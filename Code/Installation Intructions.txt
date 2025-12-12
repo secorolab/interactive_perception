@@ -1,0 +1,92 @@
+Execute steps in this order from your desired workspace.
+
+Terimnal 1
+
+git clone git@github.com:Duxi98/MT_Code.git
+
+colcon build
+
+source install/local_setup.bash
+
+ros2 run robot_controller2 Visualizer
+
+
+Terimnal 2
+
+git clone git@github.com:secorolab/freddy_single_arm_control.git
+
+colcon build
+
+source install/local_setup.bash
+
+ros2 run motion_specification_action motion_specification_action_server
+
+
+Terminal 3
+
+colcon build
+
+source install/local_setup.bash
+
+ros2 run robot_controller2 GT_Visualizer
+
+
+Terminal 4
+
+colcon build
+
+source install/local_setup.bash
+
+rviz2 -d your_directory/MT_Code/robot_controller2/robot_controller2/resources/config2.rviz
+
+
+Terminal 4.1 (If you want to run the Evaluation)
+
+colcon build
+
+source install/local_setup.bash
+
+ros2 run robot_controller2 Evaluation
+
+
+Terminal 4.2 
+
+Install Kinova Kortex Vision: https://github.com/Kinovarobotics/ros2_kortex_vision
+
+colcon build
+
+source install/local_setup.bash 
+
+ros2 launch kinova_vision kinova_vision.launch.py device:=192.168.1.12 
+
+
+Terminal 4.3
+
+git clone git@github.com:AIRLab-POLIMI/ros2-aruco-pose-estimation.git
+
+colcon build
+
+source install/local_setup.bash
+
+ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py 
+
+Ctrl-C (After localizing the ARUCO markers)
+
+
+Terminal 5
+
+colcon build
+
+source install/local_setup.bash
+
+ros2 run robot_controller2 Reasoner
+
+
+
+
+
+
+
+
+
+
