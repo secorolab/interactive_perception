@@ -348,9 +348,31 @@ def find_unique_pattern(polygon_knowledge: PolygonKnowledge,
     return False
 
 
+def is_cyclically_unique(field, tol):
+    """
+    Check if a sequence is unique under cyclic rotations
+
+    :param field: List of values (can contain None as wildcard)
+    :param tol: Tolerance for numerical comparison
+    """
+
+    n = len(field)
+
+    def is_same(a, b):
+        return all(is_close(x, y, tol=tol) for x, y in zip(a, b))
+
+    for shift in range(1, n):
+        rotated = field[shift:] + field[:shift]
+        if is_same(field, rotated):
+            return False
+
+    return True
+
+
 def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
                                  prior_knowledge: PolygonKnowledge,
                                  match_corner_coordinates: bool = False,
+                                 find_match_in_individual_parameters: bool = False,
                                  tol: float = 0.01) -> Tuple[bool, Optional[int]]:
     """
     Pattern matching using combinations of features
@@ -358,12 +380,49 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
     :param current_knowledge: Current knowledge of the polygon
     :param prior_knowledge: Prior model knowledge of the polygon
     :param match_corner_coordinates: Whether to match pattern first on the basis of corners before using rest of the knowledge
+    :param find_match_in_individual_parameters: Whether to check if any of the parameters can individually give a unique match rather than checking for uniqueness across all parameters jointly
     :return: Whether a unique pattern is found and if so, the index of the first edge in current_knowledge
     """
 
     rck = current_knowledge
     rpk = prior_knowledge
     n_sides = rck.n_sides
+
+    # Note: there are constraints such as no two adjacent edges have same slope or uniit-vecotr. 
+    # This leads to adding few constraints to determinatoin of uniqueness (TODO?)
+    if find_match_in_individual_parameters:
+        # Motivation: for example, if initially it is known that only one edge dihedral angle is unique, then when it is perceived, 
+        # it can lead to matching indices without 
+        fields_to_check = ['slopes',  'edge_unit_vectors', 'lengths',
+                           'corners', 'corner_angles',     'dihedrals']
+
+        def matches(curr_knw_rotated, prior_knw_field):
+            for a, b in zip(curr_knw_rotated, prior_knw_field):
+                if a is not None and not is_close(a, b):
+                    return False
+            return True
+
+        for field in fields_to_check:
+            rpk_field = getattr(rpk, field)
+            rck_field = getattr(rck, field)
+            # one field of prior knowledge must be complete
+            if not all(v is not None for v in rpk_field):
+                continue
+            # check cyclic uniqueness
+            if not is_cyclically_unique(rpk_field, tol):
+                continue
+
+            count = 0
+            shift_idx_rck = None
+            for shift in range(n):
+                rotated = rck_field[shift:] + rck_field[:shift]
+                if matches(rotated, rpk_field):
+                    count += 1
+                    shift_idx_rck = shift
+            if count == 1:
+                return True, shift_idx_rck
+        logger.info("No unique match found in individual parameters.")
+        return False, None
 
     if match_corner_coordinates:
         for c in range(n_sides): # rck index
@@ -377,8 +436,8 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
 
     rp_sequences = [rpk.dihedrals, rpk.corner_angles, rpk.slopes, rpk.lengths]
     rc_sequences = [rck.dihedrals, rck.corner_angles, rck.slopes, rck.lengths]
-    n = len(rp_sequences[0])
-    m = len(rp_sequences)
+    n = len(rp_sequences[0]) # number of edges
+    m = len(rp_sequences)    # number of parameters
 
     valid_rotations = []
 
@@ -512,7 +571,7 @@ def next_action(know: PolygonKnowledge,
     # find best action spec and the reference edge
     prev_edge_idx_of_best_edge_idx = (best_edge_idx - 1) % num_sides
     next_edge_idx_of_best_edge_idx = (best_edge_idx + 1) % num_sides
-    
+
     dihedral_angle_of_best_edge_deg = know.dihedrals[best_edge_idx]
     dihedral_angle_of_prev_edge_of_best_edge_deg = know.dihedrals[prev_edge_idx_of_best_edge_idx]
     dihedral_angle_of_next_edge_of_best_edge_deg = know.dihedrals[next_edge_idx_of_best_edge_idx]
@@ -1065,26 +1124,29 @@ def simulate_robot(to_plot: bool = False,
             rck.internal_points_on_edge[edge_idx].extend(get_random_points_on_line(
                 gt.corners[prev_edge_idx_in_gt], gt.corners[edge_idx_in_gt], num_points=2))
             rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[next_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
-        elif (act == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK or 
-              act == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK):
-            new_point_found = False
-            while not new_point_found:
-                if act == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK:
-                    first_edge_gt = next_edge_idx_in_gt
-                    second_edge_gt = second_next_edge_idx_in_gt
-                    edge_in_rck = next_edge_idx
-                elif act == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK:
-                    first_edge_gt = prev_edge_idx_in_gt
-                    second_edge_gt = edge_idx_in_gt
-                    edge_in_rck = prev_edge_idx
-                random_point = get_random_points_on_line(
-                gt.corners[first_edge_gt], gt.corners[second_edge_gt], num_points=1)
-                if random_point not in rck.internal_points_on_edge[edge_in_rck]:
-                    rck.internal_points_on_edge[edge_in_rck].append(random_point[0])
-                    rck.dihedrals[edge_in_rck] = gt.dihedrals[edge_idx_in_gt]
-                    new_point_found = True
-                else:
-                    pass
+        elif act in (ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK,
+                     ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK):
+            is_cck = act == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK
+
+            if is_cck:
+                first_edge_gt, second_edge_gt = next_edge_idx_in_gt, second_next_edge_idx_in_gt
+                edge_in_rck = next_edge_idx
+                dihedral_source = first_edge_gt
+            else:
+                first_edge_gt, second_edge_gt = prev_edge_idx_in_gt, edge_idx_in_gt
+                edge_in_rck = prev_edge_idx
+                dihedral_source = second_edge_gt
+
+            edge_points = rck.internal_points_on_edge[edge_in_rck]
+            for _ in range(100):
+                random_point = get_random_points_on_line(gt.corners[first_edge_gt],
+                                                        gt.corners[second_edge_gt],
+                                                        num_points=1)[0]
+                if random_point not in edge_points:
+                    edge_points.append(random_point)
+                    rck.dihedrals[edge_in_rck] = gt.dihedrals[dihedral_source]
+                    break
+
         elif (act == ActionType.SLIDE_AGAINST_EDGE_UNTIL_CORNER_CCK or
               act == ActionType.SLIDE_AGAINST_VERTICAL_SURFACE_UNTIL_CORNER_CCK):
             rck.internal_points_on_edge[edge_idx].extend(get_random_points_on_line(
@@ -1131,15 +1193,26 @@ def simulate_robot(to_plot: bool = False,
                   , ", unique_pattern_found_in_rck: ", unique_pattern_found_in_rck)
             print("Attempting to match rck with rpk...")
             rpk_rck_matching_idx_found, rpk_first_idx_in_rck = get_unique_pattern_ref_index(rck, rpk)
-        if not rpk_rck_matching_idx_found and corner_coordinates_available_in_rpk:
-            print("Attempting to match rck with rpk using corner coordinates...")
-            rpk_rck_matching_idx_found, rpk_first_idx_in_rck = get_unique_pattern_ref_index(rck, rpk, match_corner_coordinates=True)
+        if not rpk_rck_matching_idx_found:
+            if corner_coordinates_available_in_rpk:
+                print("Attempting to match rck with rpk using corner coordinates...")
+                rpk_rck_matching_idx_found, rpk_first_idx_in_rck = get_unique_pattern_ref_index(rck, rpk, match_corner_coordinates=True)
+            else:
+                print("Attempting to find unique pattern in a same parameter across geometric features")
+                rpk_rck_matching_idx_found, rpk_first_idx_in_rck = get_unique_pattern_ref_index(rck, rpk, find_match_in_individual_parameters=True)
         if rpk_rck_matching_idx_found and not rck_rearranged:
             rearrange_rck_using_prior_knowledge(rck, rpk_first_idx_in_rck)
             rck_rearranged = True
             shift_in_idx_for_rck = 0
             fill_missing_parameters(rck, rpk, rpk_rck_matching_idx_found)
             propagate_parameters(rck)
+            
+        # print("unique_pattern_found_in_rck: ", unique_pattern_found_in_rck)
+        # print("unique_pattern_found_in_rpk: ", unique_pattern_found_in_rpk)
+        # print("rpk_rck_matching_idx_found: ", rpk_rck_matching_idx_found)
+        # print("corner_coordinates_available_in_rpk: ", corner_coordinates_available_in_rpk)
+        # print("rck_rearranged: ", rck_rearranged)
+            
         rck.print_knowledge("Robot Current Knowledge (rck)")
         dof = find_dof(rck)
         print(f"DOF = {dof}")
@@ -1164,7 +1237,6 @@ def generate_polygon(n_sides: int, angles_deg: list[float], random_seed: int = 4
     polygon_knowledge_gt.corner_angles = angles_deg
 
     # randomly generate edge lengths between 1.0 and 3.0 units
-    import random
     random.seed(random_seed)
 
     # assign reflexivity based on corner angles
@@ -1192,7 +1264,8 @@ def generate_polygon(n_sides: int, angles_deg: list[float], random_seed: int = 4
     return polygon_knowledge_gt
 
 if __name__ == "__main__":
-    random_seed = 47
+    # random_seed = 47
+    random_seed = 150
     num_sides = 5
     regular_polygon = False
     angles_deg_random = generate_internal_angles(n_sides = num_sides,

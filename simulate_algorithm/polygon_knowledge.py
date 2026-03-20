@@ -86,33 +86,86 @@ class PolygonKnowledge:
                 x.append(corners[i][0] if corners[i] is not None else None)
                 y.append(corners[i][1] if corners[i] is not None else None)
                 if corners[i] is not None and corners[(i+1)%len(corners)] is not None:
+                    if self.dihedrals[i] == 90:
+                        edge_color = 'red'
+                    elif self.dihedrals[i] == 270:
+                        edge_color = 'blue'
+                    else:
+                        edge_color = 'gray'
                     plt.plot([corners[i][0], corners[(i+1)%len(corners)][0]], 
                              [corners[i][1], corners[(i+1)%len(corners)][1]], 
-                             linestyle='--', color='gray')
+                             linestyle='--', color=edge_color)
                 if len(self.internal_points_on_edge[i]) > 0:
                     for pt in self.internal_points_on_edge[i]:
-                        plt.scatter(pt[0], pt[1], marker='x', color='r', s=100)
+                        if self.dihedrals[i] is not None:
+                            if self.dihedrals[i] == 90:
+                                point_color = 'blue'
+                            elif self.dihedrals[i] == 270:
+                                point_color = 'darkgreen'
+                            else:
+                                point_color = 'red'
+                        else:
+                            point_color = 'red'
+                        plt.scatter(pt[0], pt[1], marker='x', color=point_color, s=100)
             plt.scatter(x, y, marker='o', color='r')
+            # Add legend entries
+            plt.scatter([], [], marker='x', color='blue', s=100, label='Point: dihedral = 90°')
+            plt.scatter([], [], marker='x', color='darkgreen', s=100, label='Point: dihedral = 270°')
+            plt.scatter([], [], marker='x', color='red', s=100, label='Point: dihedral unknown')
+            plt.plot([], [], linestyle='--', color='red', label='Edge: dihedral = 90°')
+            plt.plot([], [], linestyle='--', color='blue', label='Edge: dihedral = 270°')
+            plt.plot([], [], linestyle='--', color='gray', label='Edge: dihedral unknown')
             plt.title(title + " (Partial)")
             plt.xlabel('X Coordinate')
             plt.ylabel('Y Coordinate')
             plt.grid(True)
             plt.gca().set_aspect('equal', adjustable='box')  # Ensure equal scaling for X and Y axes
+            plt.legend()
             plt.show()
         else:
             x, y = zip(*corners)
             plt.figure(figsize=(6,6))
-            plt.plot(x + (x[0],), y + (y[0],), marker='o', linestyle='-', color='b')  # Close the polygon
             plt.fill(x + (x[0],), y + (y[0],), 'b', alpha=0.2)  # Filling the polygon with some transparency
+            # Draw each edge individually to color 90-degree dihedral angles red
+            for i in range(len(corners)):
+                next_i = (i + 1) % len(corners)
+                if self.dihedrals[i] == 90:
+                    edge_color = 'red'
+                elif self.dihedrals[i] == 270:
+                    edge_color = 'blue'
+                else:
+                    edge_color = 'gray'
+                plt.plot([corners[i][0], corners[next_i][0]], 
+                         [corners[i][1], corners[next_i][1]], 
+                         linestyle='-', color=edge_color)
+            # Mark corners
+            plt.scatter(x, y, marker='o', color='b')
             for i in range(len(corners)):
                 if len(self.internal_points_on_edge[i]) > 0:
                     for pt in self.internal_points_on_edge[i]:
-                        plt.scatter(pt[0], pt[1], marker='x', color='r', s=100)
+                        if self.dihedrals[i] is not None:
+                            if self.dihedrals[i] == 90:
+                                point_color = 'blue'
+                            elif self.dihedrals[i] == 270:
+                                point_color = 'darkgreen'
+                            else:
+                                point_color = 'red'
+                        else:
+                            point_color = 'red'
+                        plt.scatter(pt[0], pt[1], marker='x', color=point_color, s=100)
             plt.title(title)
             plt.xlabel('X Coordinate')
             plt.ylabel('Y Coordinate')
             plt.grid(True)
             plt.gca().set_aspect('equal', adjustable='box')  # Ensure equal scaling for X and Y axes
+            # Add legend entries
+            plt.scatter([], [], marker='x', color='blue', s=100, label='Point: dihedral = 90°')
+            plt.scatter([], [], marker='x', color='darkgreen', s=100, label='Point: dihedral = 270°')
+            plt.scatter([], [], marker='x', color='red', s=100, label='Point: dihedral unknown/other')
+            plt.plot([], [], linestyle='-', color='red', label='Edge: dihedral = 90°')
+            plt.plot([], [], linestyle='-', color='blue', label='Edge: dihedral = 270°')
+            plt.plot([], [], linestyle='-', color='gray', label='Edge: dihedral unknown/other')
+            plt.legend()
             plt.show()
             
     def get_all_points_on_edge(self, i: int) -> Optional[List[Tuple[float, float]]]:
