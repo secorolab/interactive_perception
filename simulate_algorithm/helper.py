@@ -141,16 +141,17 @@ def get_random_points_on_line(p1: Tuple[float, float],
     :param num_points: Number of random points to generate
     :return: List random points on the line segment
     """
-    points = []
-    for _ in range(num_points):
-        t = np.random.uniform(0.01, 1) # 0.01 as sampling includes lower limit
-        x = p1[0] + t * (p2[0] - p1[0])
-        y = p1[1] + t * (p2[1] - p1[1])
-        points.append((x, y))
-        
-    points.sort(key=lambda point: np.linalg.norm(np.array(point) - np.array(p1)))
-    return points
 
+    eps = 0.1
+    t_values = np.sort(np.random.uniform(eps, 1 - eps, num_points))
+    
+    # debug
+    print(f"Generating {num_points} random points on line segment between {p1} and {p2} with t values: {t_values}")
+    print(f"sampled points before sorting: {[ (p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])) for t in t_values]}")
+
+    return [ (p1[0] + t * (p2[0] - p1[0]),
+              p1[1] + t * (p2[1] - p1[1]))
+              for t in t_values ]
 
 def get_unit_vector(head_point: Tuple[float, float],
                     tail_point: Tuple[float, float]) -> np.ndarray:
@@ -357,7 +358,7 @@ def are_adjacent_and_action_in_order(prev_action_spec: ActionSpec,
                                      prev_action_edge_idx, 
                                      num_sides):
     """
-    Check whether two indices are adjacent in a circular structure.
+    Check whether two indices are adjacent in a circular structure. CCK or CK direction of previous action determines the expected order of adjacency.
 
     :param prev_action_spec: previous action specification
     :param target_edge: target edge index
@@ -409,7 +410,7 @@ def flip_direction(direction: Direction):
 
 def has_unit_vectors_and_points_for_all_edges(know: PolygonKnowledge) -> bool:
     """
-    Check if all edge unit vectors are known
+    Check if all edge unit vectors are known with minimum one point on each edge
 
     :param know: Knowledge of the polygon
     :return: whether all edge unit vectors are known with atleast one point on each
@@ -464,6 +465,7 @@ def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
                     if len(pts_on_curr_edge) > 1:
                         key_fn = lambda p: np.linalg.norm(np.asarray(p) - current_corner_arr)
                         if not is_sorted_by_key(pts_on_curr_edge, key_fn):
+                            print(f" => The distances of points on edge {i} to corner {i} are not in ascending order: {[key_fn(p) for p in pts_on_curr_edge]}")
                             pts_on_curr_edge.sort(key=key_fn)
                             know.internal_points_on_edge[i] = pts_on_curr_edge
                             changed = True
@@ -474,6 +476,7 @@ def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
                     if len(pts_on_prev_edge) > 1:
                         key_fn = lambda p: np.linalg.norm(np.asarray(p) - current_corner_arr)
                         if not is_sorted_by_key(pts_on_prev_edge, key_fn, reverse=True):
+                            print(f" => The distances of points on edge {prev_idx} to corner {i} are not in descending order: {[key_fn(p) for p in pts_on_prev_edge]}")
                             pts_on_prev_edge.sort(key=key_fn, reverse=True)
                             know.internal_points_on_edge[prev_idx] = pts_on_prev_edge
                             changed = True
