@@ -28,35 +28,6 @@ class StateOfExecution(Enum):
     COMPLETED = 3
     FAILED = 4
 
-def calculate_quaternion(roll, pitch, yaw):
-    roll = roll * math.pi / 180.0
-
-    pitch = pitch * math.pi / 180.0
-
-    yaw = yaw * math.pi / 180.0
-
-    cy = math.cos(yaw * 0.5)
-
-    sy = math.sin(yaw * 0.5)
-
-    cp = math.cos(pitch * 0.5)
-
-    sp = math.sin(pitch * 0.5)
-
-    cr = math.cos(roll * 0.5)
-
-    sr = math.sin(roll * 0.5)
-
-    qw = cr * cp * cy + sr * sp * sy
-
-    qx = sr * cp * cy - cr * sp * sy
-
-    qy = cr * sp * cy + sr * cp * sy
-
-    qz = cr * cp * sy - sr * sp * cy
-
-    return [qx, qy, qz, qw]
-
 def pose_from_points(points, use_ransac=False, max_iterations=100, distance_threshold=0.005, min_inliers_ratio=0.7):
     """
     Given >=3 points in 3D, compute:
@@ -175,32 +146,6 @@ def quat_vel_to_rpy_yaw(velocity):
         yaw = vel_yaw + 90.0
 
     return float(yaw)
-
-
-def look_down_rpy():
-    return[180, 0, 0]
-
-def look_down_mf_rpy():
-    return[0, 0, 0]
-
-def look_forward():
-    return calculate_quaternion(90, 0, 90)
-
-def look_down():
-    return calculate_quaternion(180, 0, 0)
-
-def look_down_mf():
-    return calculate_quaternion(0, 0, 0)
-
-def look_down_mf_test():
-    return calculate_quaternion(0, 0, -90)
-
-def look_custom():
-    return calculate_quaternion(180, 180, 80)
-
-def is_negative(value):
-    return value < 0
-
 
 def is_within_range(value: float, target: float, deviation: float) -> bool:
     if value is None:
