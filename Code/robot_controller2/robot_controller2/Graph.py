@@ -5,21 +5,21 @@ global pos
 
 pos = None
 
-def update_belief_state_visualization(robot_knowledge, center_node_id: str = 'polygon_0', k_value: float = 1.0, pause_time: float = 2):
+def render_graph_visualization(rck_graph, center_node_id: str = 'polygon_0', k_value: float = 1.0, pause_time: float = 2):
     """
-    Dynamically displays the global robot_knowledge graph in an updating
+    Dynamically displays the current knowledge of polygon (rck) in an updating
     Matplotlib window, with a specified node centered in the plot and
     displays the individual values of each node.
     """
     global pos
 
-    if center_node_id not in robot_knowledge.nodes:
+    if center_node_id not in rck_graph.nodes:
         print(f"Error: The node '{center_node_id}' selected to be centered does not exist in the graph.")
         return
 
     # If pos is None or if the graph has new nodes not yet in pos, calculate an initial layout for all nodes.
-    if pos is None or any(node not in pos for node in robot_knowledge.nodes):
-        pos = nx.spring_layout(robot_knowledge, k=k_value, seed=42, iterations=50)
+    if pos is None or any(node not in pos for node in rck_graph.nodes):
+        pos = nx.spring_layout(rck_graph, k=k_value, seed=42, iterations=50)
 
     # Explicitly set the center node's position to (0,0) in a temporary dictionary, This ensures its the anchor for the next layout calculation
     fixed_nodes = [center_node_id]
@@ -30,7 +30,7 @@ def update_belief_state_visualization(robot_knowledge, center_node_id: str = 'po
 
     # Recalculate layout, fixing the center node at its new (0,0) position.
     # Other nodes will adjust around it.
-    pos = nx.spring_layout(robot_knowledge, pos=combined_pos, fixed=fixed_nodes, k=k_value, seed=42, iterations=5000)
+    pos = nx.spring_layout(rck_graph, pos=combined_pos, fixed=fixed_nodes, k=k_value, seed=42, iterations=5000)
 
     # Clear the current figure
     plt.clf()
@@ -38,7 +38,7 @@ def update_belief_state_visualization(robot_knowledge, center_node_id: str = 'po
     # Define node colors and labels based on node type and node values
     node_colors = []
     node_labels = {}
-    for node_id, attributes in robot_knowledge.nodes(data=True):
+    for node_id, attributes in rck_graph.nodes(data=True):
         node_type = attributes.get('type')
         label_text = node_id
 
@@ -66,7 +66,7 @@ def update_belief_state_visualization(robot_knowledge, center_node_id: str = 'po
                 coords = ', '.join(
                     f"{val:.1f}" if isinstance(val, (int, float)) else str(val) for val in attributes['data'])
                 label_text += f"\nData: ({coords})"
-        elif node_type in ['2d_corner_angle', '2d_edge_angle']:
+        elif node_type in ['2d_corner_angle', '2d_dihedral_angle']:
             node_colors.append('salmon')
             if 'angle' in attributes:
                 label_text += f"\nAngle: {attributes['angle']}°"
@@ -76,10 +76,10 @@ def update_belief_state_visualization(robot_knowledge, center_node_id: str = 'po
         node_labels[node_id] = label_text
 
     # Draw the graph
-    nx.draw_networkx_nodes(robot_knowledge, pos, node_color=node_colors,
+    nx.draw_networkx_nodes(rck_graph, pos, node_color=node_colors,
                            node_size=900)
-    nx.draw_networkx_edges(robot_knowledge, pos)
-    nx.draw_networkx_labels(robot_knowledge, pos, labels=node_labels, font_size=8)
+    nx.draw_networkx_edges(rck_graph, pos)
+    nx.draw_networkx_labels(rck_graph, pos, labels=node_labels, font_size=8)
 
     plt.title("Robot Knowledge Graph")
     # Hide the axes
@@ -128,7 +128,7 @@ def create_graph_from_json(data):
             attributes['angle'] = data_values.get(node['angle'])
             attributes['polygon_id'] = node['polygon_id']
             attributes['corner'] = node['corner']
-        elif node_type == '2d_edge_angle':
+        elif node_type == '2d_dihedral_angle':
             attributes['angle'] = data_values.get(node['angle'])
             attributes['segment'] = node['segment']
             attributes['polygons'] = node['polygons']
@@ -183,11 +183,11 @@ def get_next_contact_point_id(graph):
     next_index = max(indices) + 1 if indices else 0
     return f"contact_point_{next_index}"
 
-def get_next_2d_edge_angle_id(graph):
-    """Return the next available edge_angle ID for the given segment."""
+def get_next_2d_dihedral_angle_id(graph):
+    """Return the next available dihedral_angle ID for the given segment."""
     existing_cps = [
         n for n in graph
-        if graph.nodes[n].get("type") == "2d_edge_angle"
+        if graph.nodes[n].get("type") == "2d_dihedral_angle"
     ]
 
     indices = []
@@ -198,7 +198,7 @@ def get_next_2d_edge_angle_id(graph):
             pass
 
     next_index = max(indices) + 1 if indices else 0
-    return f"edge_angle_{next_index}"
+    return f"dihedral_angle_{next_index}"
 
 def get_next_2d_corner_angle_id(graph):
     """Return the next available corner_angle ID for the given segment."""

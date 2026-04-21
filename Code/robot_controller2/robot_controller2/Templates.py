@@ -50,7 +50,7 @@ reset = {
         'number_of_disjunctions': 1,
         'constraints': {
             1: {
-                "disjunction_id": 0,
+                "disjunction_id": 1,
                 'type': 'POSITION_XYZ',
                 'value': [100.0, 100.0, 100.0],
                 'operator': ['LESS_THAN', 'LESS_THAN', 'LESS_THAN']
@@ -95,67 +95,61 @@ neutral = {
         'number_of_disjunctions': 1,
         'constraints': {
             1: {
-                "disjunction_id": 0,
+                "disjunction_id": 1,
                 'type': 'POSITION_XYZ',
-                'value': [100.0, 100.0, 100.0],
-                'operator': ['LESS_THAN', 'LESS_THAN', 'LESS_THAN']
+                'value': [None, None, None],
+                'operator': [None, None, None] # TODO: check if it always satisfies post condition immediately
             },
-
         }
-
     }
 }
 }
-
-
 
 
 move = {
 "arm_name": "KINOVA_GEN3_2_RIGHT",
-'KINOVA_GEN3_2_RIGHT':{
-    "action_name": "move",
-    "reach_pre_configuration_joint_angles": "false",
-    'frame_name': 'eddie_base_link',
-    'PRE_CONDITION': {
-        'constraint_count': 0
-    },
-    "PER_CONDITION": {
-        'constraint_count': 2,
-        'constraints': {
-            1: {
-                'type': 'POSITION_XYZ',
-                'value': [0.6, -0.5, 0.00],
-                'operator': ['EQUAL', 'EQUAL', 'EQUAL']
-            },
-            2: {
-                'type': 'ORIENTATION_QUATERNION',
-                'value': [0.5, 0.4999999999999999, 0.5, 0.5000000000000001],
-                'operator': ['EQUAL', 'EQUAL', 'EQUAL', 'EQUAL']
-            },
+    'KINOVA_GEN3_2_RIGHT':{
+        "action_name": "move",
+        "reach_pre_configuration_joint_angles": "false",
+        'frame_name': 'eddie_base_link',
+        'PRE_CONDITION': {
+            'constraint_count': 0
+        },
+        "PER_CONDITION": {
+            'constraint_count': 2,
+            'constraints': {
+                1: {
+                    'type': 'POSITION_XYZ',
+                    'value': [None, None, None],
+                    'operator': [None, None, None]
+                },
+                2: {
+                    'type': 'ORIENTATION_QUATERNION',
+                    'value': [None, None, None, None],
+                    'operator': [None, None, None, None]
+                },
+            }
+        },
+        "POST_CONDITION": {
+            'constraint_count': 2,
+            'number_of_disjunctions': 1,
+            'constraints': {
+                1: {
+                    "disjunction_id": 1,
+                    'type': 'POSITION_XYZ',
+                    'value': [None, None, None],
+                    'operator': [None, None, None]
+                },
+                2: {
+                    "disjunction_id": 1,
+                    'type': 'POSITION_XYZ',
+                    'value': [None, None, None],
+                    'operator': [None, None, None]
+                },
+            }
         }
-    },
-    "POST_CONDITION": {
-        'constraint_count': 2,
-        'number_of_disjunctions': 1,
-        'constraints': {
-            1: {
-                "disjunction_id": 0,
-                'type': 'POSITION_XYZ',
-                'value': [0.55, -0.49, 0.0],
-                'operator': ['GREATER_THAN', 'GREATER_THAN', 'GREATER_THAN']
-            },
-            2: {
-                "disjunction_id": 0,
-                'type': 'POSITION_XYZ',
-                'value': [0.55, -0.49, 0.0],
-                'operator': ['GREATER_THAN', 'GREATER_THAN', 'GREATER_THAN']
-            },
-        }
-
     }
 }
-}
-
 
 
 touch = {
@@ -183,26 +177,30 @@ touch = {
         }
     },
     "POST_CONDITION": {
-        'constraint_count': 2,
+        'constraint_count': 3,
         'number_of_disjunctions': 1,
         'constraints': {
             1: {
                 "disjunction_id": 1,
-                'type': 'FORCE_XYZ',
-                'value': [None, None, -0.4],
+                'type': 'VELOCITY_XYZ',
+                'value': [None, None, 0.005],
                 'operator': [None, None, 'GREATER_THAN']
             },
             2: {
                 "disjunction_id": 1,
-                'type': 'FORCE_XYZ',
-                'value': [None, None, -0.4],
-                'operator': [None, None, 'LESS_THAN']
+                'type': 'VELOCITY_XYZ',
+                'value': [None, None, 0.005],
+                'operator': [None, None, 'GREATER_THAN']
             },
-
+            3: {
+                "disjunction_id": 1,
+                'type': 'TiME_LIMIT',
+                'value': None,
+                'operator': None
+                },
+            }
         }
-
     }
-}
 }
 
 slide = {
@@ -225,63 +223,62 @@ slide = {
         'constraint_count': 3,
         'constraints': {
             1: {
-                'type': 'POSITION_XYZ',
+                'type': 'VELOCITY_XYZ',
                 'value': [0.6, -0.5, 0.00],
                 'operator': ['EQUAL', 'EQUAL', 'EQUAL']
             },
             2: {
+                'type': 'FORCE_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            3: {
                 'type': 'ORIENTATION_QUATERNION',
                 'value': [0.5, 0.4999999999999999, 0.5, 0.5000000000000001],
                 'operator': ['EQUAL', 'EQUAL', 'EQUAL', 'EQUAL']
-            },
-            3: {
-                 'type': 'ORIENTATION_QUATERNION',
-                 'value': [None, None, None, None],
-                 'operator': [None, None, None, None]
-             }
+            }
         }
     },
     "POST_CONDITION": {
-        'constraint_count': 5,
-        'number_of_disjunctions': 5,
+        'constraint_count': 6,
+        'number_of_disjunctions': 6,
         'constraints': {
             1: {
-                'disjunction_id': 0,
-                'type': 'FORCE_XYZ',
-                'value': [None, None, -0.4],
-                'operator': [None, None, 'GREATER_THAN']
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
             },
             2: {
                 'disjunction_id': 1,
                 'type': 'POSITION_XYZ',
-                'value': [-1000.0, None, None],
-                'operator': ['GREATER_THAN', None, None]
+                'value': [None, None, None],
+                'operator': [None, None, None]
             },
             3: {
                 'disjunction_id': 1,
                 'type': 'POSITION_XYZ',
-                'value': [-1000.0, None, None],
-                'operator': ['GREATER_THAN', None, None]
+                'value': [None, None, None],
+                'operator': [None, None, None]
             },
             4: {
                 'disjunction_id': 1,
                 'type': 'POSITION_XYZ',
-                'value': [-1000.0, None, None],
-                'operator': ['GREATER_THAN', None, None]
+                'value': [None, None, None],
+                'operator': [None, None, None]
             },
             5: {
                 'disjunction_id': 1,
                 'type': 'POSITION_XYZ',
-                'value': [-1000.0, None, None],
-                'operator': ['GREATER_THAN', None, None]
+                'value': [None, None, None],
+                'operator': [None, None, None]
             },
             6: {
                 'disjunction_id': 1,
                 'type': 'POSITION_XYZ',
-                'value': [-1000.0, None, None],
-                'operator': ['GREATER_THAN', None, None]
-            },
-
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            }
         }
 
     }

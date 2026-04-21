@@ -25,9 +25,9 @@ from typing import Tuple, Optional
 from dataclasses import replace
 import sympy as sp
 from scipy.optimize import linprog
-from polygon_knowledge import PolygonKnowledge
-from helper import *
-from data_structures import *
+from .polygon_knowledge import PolygonKnowledge
+from .helper import *
+from .data_structures import *
 import random
 
 logger = logging.getLogger(__name__)
@@ -487,7 +487,8 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
 def next_action(know: PolygonKnowledge,
                 prev_action_instance: ActionInstance | None,
                 rck_rearranged: bool,
-                gt: PolygonKnowledge) -> Tuple[Optional[ActionType], Optional[int]]:
+                in_simulation: bool = False,
+                gt: PolygonKnowledge = None) -> Tuple[Optional[ActionType], Optional[int]]:
     """
     Pick next edge feature to explore based on current knowledge. This is not linked to robot position, 
     but motion specification generator will take it into account to decide motion specification and setpoints
@@ -574,21 +575,23 @@ def next_action(know: PolygonKnowledge,
         # create a copy of know and see getting two points on which edge reduces dof the most
         best_edge_idx = edges_available_to_explore[0]
         best_dof = find_dof(know)
+        
+        if in_simulation:
 
-        for edge_idx in edges_available_to_explore:
-            temp_know = copy.deepcopy(know)
-            # simulate measuring two points
-            next_edge_idx = (edge_idx + 1) % num_sides
-            internal_pts_on_edge = get_random_points_on_line(
-                gt.corners[next_edge_idx], gt.corners[edge_idx], num_points=2) # TODO: use symbolic constraint propagation here to get dof
-            print(" Thinking... internal_pts_on_edge: ", internal_pts_on_edge)
-            temp_know.internal_points_on_edge[edge_idx] = copy.deepcopy(internal_pts_on_edge)
-            temp_know.is_reflexive_angle[edge_idx] = gt.is_reflexive_angle[edge_idx]
-            propagate_parameters(temp_know)
-            dof_after_two_points = find_dof(temp_know)
-            if dof_after_two_points < best_dof:
-                best_dof = dof_after_two_points
-                best_edge_idx = edge_idx
+            for edge_idx in edges_available_to_explore:
+                temp_know = copy.deepcopy(know)
+                # simulate measuring two points
+                next_edge_idx = (edge_idx + 1) % num_sides
+                internal_pts_on_edge = get_random_points_on_line(
+                    gt.corners[next_edge_idx], gt.corners[edge_idx], num_points=2) # TODO: use symbolic constraint propagation here to get dof
+                print(" Thinking... internal_pts_on_edge: ", internal_pts_on_edge)
+                temp_know.internal_points_on_edge[edge_idx] = copy.deepcopy(internal_pts_on_edge)
+                temp_know.is_reflexive_angle[edge_idx] = gt.is_reflexive_angle[edge_idx]
+                propagate_parameters(temp_know)
+                dof_after_two_points = find_dof(temp_know)
+                if dof_after_two_points < best_dof:
+                    best_dof = dof_after_two_points
+                    best_edge_idx = edge_idx
 
     # find best action spec and the reference edge
     prev_edge_idx_of_best_edge_idx = (best_edge_idx - 1) % num_sides
@@ -789,7 +792,7 @@ def next_action(know: PolygonKnowledge,
 
         elif (are_adjacent(best_edge_idx, prev_action_edge_idx, num_sides) and not
             are_adjacent_and_action_in_order(prev_action_spec, best_edge_idx, prev_action_edge_idx, num_sides)):
-            print("Debug: best_edge_idx: ", best_edge_idx, " prev_action_edge_idx: ", prev_action_edge_idx)
+            print("Debug: best_edge_idx: ", best_edge_idx, " prev_action_edge_idx (ref): ", prev_action_edge_idx)
             print("Though action took adjacent edge for reference, it did not traverse in the desired direction to take it ahead. Selecting action independent of robot end-effector location")
 
         # edge vector is unknown or no point on it is known; previous edge is known and atleast one point on it is known
@@ -872,7 +875,9 @@ def next_action(know: PolygonKnowledge,
                 stop = Stop.UNTIL_EDGE_CONTACT
             elif reflexivity_of_corner_of_interest_of_best_edge_idx is True:
                 # TODO: save what actions were performed over each edge in that edge. So if an edge was slided until corner/corner is known, then only appraoching from outside works.
-                if corner_of_interest is not None: # or if the history of action over the edge includes sliding until corner
+                # convert action type to action spec
+                prev_spec = ACTION_TO_SPEC[prev_action_instance.action_type]
+                if corner_of_interest is not None: # or prev_spec.stop == Stop.UNTIL_CORNER: (with assumption of prev. motion along adj edge). Ideally, the history of action over the edge includes sliding until corner
                     mode = Mode.PARALLEL_OVER_SURFACE_FROM_OUTSIDE
                     stop = Stop.UNTIL_EDGE_CONTACT
                     direction = flip_direction(direction)
@@ -888,7 +893,7 @@ def next_action(know: PolygonKnowledge,
 
         best_action_spec = ActionSpec(direction, mode, stop)
         best_action_type = SPEC_TO_ACTION[best_action_spec]
-        return (best_action_type, edge)
+        return (best_action_type, ref_edge)
     return None, None
 
 

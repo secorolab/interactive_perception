@@ -1,0 +1,7 @@
+# Core Algorithm Package Requirements
+# These are the minimal dependencies needed for polygon knowledge
+# representation and motion planning reasoning.
+
+numpy>=1.20.0
+matplotlib>=3.3.0
+scipy>=1.7.0

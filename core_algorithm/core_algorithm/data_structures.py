@@ -82,3 +82,8 @@ SPEC_TO_ACTION: Dict[ActionSpec, ActionType] = {
     ActionSpec(Direction.CK,  Mode.PARALLEL_IN_FREE_SPACE_FROM_OUTSIDE, Stop.UNTIL_EDGE_CONTACT): ActionType.MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CK,
     ActionSpec(Direction.CCK, Mode.PARALLEL_IN_FREE_SPACE_FROM_OUTSIDE, Stop.UNTIL_EDGE_CONTACT): ActionType.MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CCK
 }
+
+
+ACTION_TO_SPEC: Dict[ActionType, ActionSpec] = {
+    action: spec for spec, action in SPEC_TO_ACTION.items()
+}

@@ -59,7 +59,7 @@ global current_position
 
 global current_orientation
 
-global current_frame
+global current_ms_frame
 
 global robot_knowledge
 
@@ -74,6 +74,9 @@ global current_segment
 graph_complete = False
 
 collected_points = []
+
+# NEW: Separate list for edge exploration points to avoid clearing collected_points during slide_plane_multiple
+edge_exploration_points = []
 
 marker_positions = []
 
@@ -721,7 +724,9 @@ class ReasonerNode(ROSNode):
                         angle = -0.45
                         while cartesian_distance(new_position, old_position) < 0.035:
                             print(cartesian_distance(new_position, old_position))
-                            collected_points = []
+                            # NEW: Use edge_exploration_points instead of collected_points for edge exploration
+                            edge_exploration_points = []
+                            # OLD: collected_points = []  # This was clearing the list needed for slide_blind marker
                             edge_velocity = ee_velocity_with_angle(current_position, angle)
                             self.send_goal(Util.make_action_goal_slide(edge_velocity, current_orientation, mode="slide_edge",
                                                                        frame_name="marker_frame_0"))
@@ -768,7 +773,9 @@ class ReasonerNode(ROSNode):
                         new_position = current_position
                         angle = 0.45
                         while cartesian_distance(new_position, old_position) < 0.035:
-                            collected_points = []
+                            # NEW: Use edge_exploration_points instead of collected_points for edge exploration
+                            edge_exploration_points = []
+                            # OLD: collected_points = []  # This was clearing the list needed for slide_blind marker
                             edge_velocity = ee_velocity_with_angle(current_position, angle)
 
                             # Inverse the velocity
@@ -866,13 +873,11 @@ class ReasonerNode(ROSNode):
                 action_list = [
                     Util.make_action_goal_move([None, None, 0.15], current_orientation, current_position,
                                                "marker_frame_0"),
-                    # str(Templates.reset),
                     Util.make_action_goal_move([move_position_x, move_position_y, 0.15],
                                                current_orientation, current_position,
                                                "marker_frame_0"),
                     Util.make_action_goal_yaw([move_position_x, move_position_y, 0.1], yaw=slide_yaw, yaw_threshold=0.1,
                                               frame_name="marker_frame_0", time_limit=15.0),
-
                     Util.make_action_goal_touch([0.0, 0.0, -0.02], orientation=slide_orientation, current_position=current_position,
                                                 frame_name="marker_frame_0"),
                     Util.make_action_goal_slide(slide_velocity, slide_orientation, mode="slide_plane_multiple",
@@ -960,7 +965,6 @@ class ReasonerNode(ROSNode):
                                                 "marker_frame_0"),
                     Util.make_action_goal_slide(slide_velocity, slide_orientation, mode="slide_plane_multiple",
                                                 frame_name="marker_frame_0")]
-
 
         return action_list
 
@@ -1404,14 +1408,14 @@ class ReasonerNode(ROSNode):
         if frame:
             pose_stamped.header.frame_id = frame
         else:
-            pose_stamped.header.frame_id = current_frame
+            pose_stamped.header.frame_id = current_ms_frame
 
         # Set position
         pose_stamped.pose.position.x = x
         pose_stamped.pose.position.y = y
         #pose_stamped.pose.position.z = z
 
-        if current_frame == "marker_frame_0":
+        if current_ms_frame == "marker_frame_0":
             pose_stamped.pose.position.z = 0.0
         else:
             pose_stamped.pose.position.z = z
@@ -1437,11 +1441,11 @@ class ReasonerNode(ROSNode):
         return
 
     def ee_callback(self, msg):
-        global current_position, current_orientation, current_frame
+        global current_position, current_orientation, current_ms_frame # ee_pose is returned in the same frame as ongoing motion specification
 
         frame_id = msg.header.frame_id
 
-        current_frame = frame_id
+        current_ms_frame = frame_id
 
         #Take ee position here and unpack it into current_position
         x = msg.pose.position.x
@@ -1518,4 +1522,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

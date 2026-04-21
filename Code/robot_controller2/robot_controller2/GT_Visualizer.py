@@ -20,7 +20,11 @@ from geometry_msgs.msg import Point
 from builtin_interfaces.msg import Duration
 import mapbox_earcut as earcut
 import numpy as np
-from aruco_interfaces.msg import ArucoMarkers
+
+try:
+    from aruco_interfaces.msg import ArucoMarkers
+except ImportError:
+    ArucoMarkers = None
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import PointStamped
@@ -145,12 +149,13 @@ class GT_VisualizerNode(Node):
         print("Created GT_Visualizer Node.")
 
 
-        self.create_subscription(
-            ArucoMarkers,
-            "/aruco/markers",
-            self.ground_truth_callback,
-            10
-        )
+        if ArucoMarkers:
+            self.create_subscription(
+                ArucoMarkers,
+                "/aruco/markers",
+                self.ground_truth_callback,
+                10
+            )
         self.subscription = self.create_subscription(
             PoseStamped,
             '/ee_pose',

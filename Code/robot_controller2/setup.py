@@ -12,7 +12,7 @@ setup(
             ['action/MyAction.action']),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools', 'rclpy', 'rosidl-default-generators', 'networkx'],
+    install_requires=['setuptools', 'rclpy', 'networkx', 'mapbox-earcut', 'core-algorithm', 'PyYAML'],
     zip_safe=True,
     maintainer='linux',
     maintainer_email='linux@todo.todo',
@@ -23,7 +23,7 @@ setup(
         'console_scripts': [
             'Visualizer = robot_controller2.Visualizer:main',
             'GT_Visualizer = robot_controller2.GT_Visualizer:main',
-            'Reasoner = robot_controller2.Reasoner:main',
+            'Reasoner_refactored = robot_controller2.Reasoner_refactored:main',
             'test_ms = robot_controller2.test_motion_spec:main',
             'Templates = robot_controller2.Templates:main',
             'Util = robot_controller2.Util:main',
@@ -31,7 +31,11 @@ setup(
         ],
     },
     package_data={
-        'robot_controller2': ['action/MyAction.action'],
+        'robot_controller2': [
+            'action/MyAction.action',
+            'config/*.yaml',
+            'resources/**/*',
+        ],
     },
     options={
         'build_scripts': {

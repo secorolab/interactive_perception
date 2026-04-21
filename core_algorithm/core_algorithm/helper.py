@@ -3,8 +3,8 @@ from random import random
 import numpy as np
 import math
 from typing import Union, Tuple, Optional, List, Callable, TypeVar, Sequence, Dict
-from polygon_knowledge import PolygonKnowledge
-from data_structures import *
+from .polygon_knowledge import PolygonKnowledge
+from .data_structures import *
 
 def is_close(p1: Union[float, Tuple[float, float]], 
              p2: Union[float, Tuple[float, float]], 
@@ -325,9 +325,6 @@ def edge_unit_vector_and_atleast_one_point_known(know: PolygonKnowledge,
     return True
 
 
-ACTION_TO_SPEC: Dict[ActionType, ActionSpec] = {
-    action: spec for spec, action in SPEC_TO_ACTION.items()
-}
 def action_spec_from_action(action: ActionType) -> Optional[ActionSpec]:
     """
     Retrieve the ActionSpec corresponding to a given action.

@@ -1,0 +1,75 @@
+# Reasoner Node Configuration
+
+# Experiment and polygon settings
+experiment:
+  id: 4
+  n_sides: 4
+
+# Knowledge propagation parameters
+knowledge_propagation:
+  min_points_to_remove_outliers: 4
+  inlier_distance_threshold: 0.02
+
+# Motion and action settings
+motion:
+  take_user_input_for_orientation: true
+  default_orientation: 0  # 0: in direction, 1: against, 2: right, 3: left
+  offset_above_surface: 0.04
+  offset_below_surface: 0.03
+  touch_velocity: 0.03
+  slide_velocity: 0.05
+  slide_offset_from_edge: 0.05
+  force_against_surface: 20.0
+  diameter_of_end_effector: 0.06
+
+# Action-specific default orientations
+# If take_user_input_for_orientation is false, these values are used
+# 0: IN_DIR_MOTION, 1: AGAINST_DIR_MOTION, 2: RIGHT_OF_DIR_MOTION, 3: LEFT_OF_DIR_MOTION
+action_defaults:
+  SLIDE_OVER_SURFACE_UNTIL_EDGE:
+    default_orientation: 0
+  SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT:
+    default_orientation: 0
+    offset_from_edge: 0.05
+  SLIDE_AGAINST_EDGE_CCK:
+    default_orientation: 2
+  SLIDE_AGAINST_EDGE_CK:
+    default_orientation: 3
+  SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK:
+    default_orientation: 3
+  SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK:
+    default_orientation: 2
+  SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CCK:
+    default_orientation: 0
+  SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CK:
+    default_orientation: 0
+  SLIDE_AGAINST_EDGE_UNTIL_CORNER_CCK:
+    default_orientation: 2
+  SLIDE_AGAINST_EDGE_UNTIL_CORNER_CK:
+    default_orientation: 3
+  SLIDE_AGAINST_VERTICAL_SURFACE_CCK:
+    default_orientation: 3
+  SLIDE_AGAINST_VERTICAL_SURFACE_CK:
+    default_orientation: 2
+  SLIDE_AGAINST_VERTICAL_SURFACE_UNTIL_CORNER_CCK:
+    default_orientation: 3
+  SLIDE_AGAINST_VERTICAL_SURFACE_UNTIL_CORNER_CK:
+    default_orientation: 2
+  MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CK:
+    default_orientation: 1
+  MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CCK:
+    default_orientation: 1
+
+# Frame and coordinate settings
+frames:
+  base_frame: "eddie_base_link"
+  marker_topic: "/marker_position"
+  corner_topic: "/corner_position"
+  plane_topic: "/plane_position"
+  ee_pose_topic: "/ee_pose" # pose in the frame of motion_specification
+  motion_action: "motion_specification"
+
+# Visualization settings
+visualization:
+  render_graph: true
+  update_frequency_hz: 10
