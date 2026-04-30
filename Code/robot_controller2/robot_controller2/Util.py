@@ -3,15 +3,11 @@ import subprocess
 import math
 from typing import List
 from robot_controller2 import Templates
-from geometry_msgs.msg import Quaternion
-import json
 from enum import Enum
-#from tf_transformations import quaternion_from_euler
-from sympy.physics.units import force, velocity
-from tf_transformations import euler_from_quaternion
-from tf_transformations import quaternion_from_euler
 import numpy as np
+import copy
 from scipy.spatial.transform import Rotation as Rscipy
+from scipy.spatial.transform import Rotation as R
 
 gt = "GREATER_THAN"
 eq = "EQUAL"
@@ -28,6 +24,84 @@ class StateOfExecution(Enum):
     COMPLETED = 3
     FAILED = 4
 
+class OrientationInput(Enum):
+    """Enum for specifying desired orientation relative to direction of motion."""
+    IN_DIR_MOTION = 0
+    AGAINST_DIR_MOTION = 1
+    RIGHT_OF_DIR_MOTION = 2
+    LEFT_OF_DIR_MOTION = 3
+
+## helper functions
+
+def resample_line_points(points, spacing=0.01):
+    """
+    Given noisy 2D points roughly along a line, return evenly spaced points.
+
+    points: (N,2) array-like
+    spacing: desired spacing (same units as input, e.g. 0.01 = 1 cm)
+
+    returns: (M,2) numpy array of resampled points
+    """
+    
+    pts = np.asarray(points, dtype=float)
+
+    if len(pts) < 2:
+        raise ValueError("Need at least 2 points")
+
+    mean = pts.mean(axis=0)
+    centered = pts - mean
+
+    cov = centered.T @ centered / (len(pts) - 1)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+
+    if eigvals.max() < 1e-6:
+        raise RuntimeError("Points have near-zero spread")
+
+    direction = eigvecs[:, np.argmax(eigvals)]
+    direction /= np.linalg.norm(direction)
+
+    t = centered @ direction
+    t_sorted = np.sort(t)
+
+    t_min, t_max = t_sorted[0], t_sorted[-1]
+
+    if t_max - t_min < spacing:
+        raise RuntimeError("Point extent smaller than spacing")
+
+    n = int(np.floor((t_max - t_min) / spacing)) + 1
+    t_resampled = t_min + spacing * np.arange(n)
+
+    return mean + np.outer(t_resampled, direction)
+
+def unit_vector_from_points_2d(points):
+    """
+    Estimate a unit direction vector from noisy 2D points using PCA.
+
+    :param points: array-like of shape (N, 2)
+    :return: unit vector (vx, vy)
+    """
+    pts = np.asarray(points, dtype=float)
+
+    if pts.shape[0] < 2:
+        raise ValueError("Need at least 2 points")
+
+    # center the data (remove translation)
+    mean = pts.mean(axis=0)
+    centered = pts - mean
+
+    # covariance matrix
+    cov = np.dot(centered.T, centered) / (len(pts) - 1)
+
+    # Eigen decomposition
+    eigvals, eigvecs = np.linalg.eigh(cov)
+
+    # take eigenvector with largest eigenvalue
+    direction = eigvecs[:, np.argmax(eigvals)]
+
+    # normalize
+    direction /= np.linalg.norm(direction)
+    return direction[0:2]
+    
 def pose_from_points(points, use_ransac=False, max_iterations=100, distance_threshold=0.005, min_inliers_ratio=0.7):
     """
     Given >=3 points in 3D, compute:
@@ -111,49 +185,30 @@ def pose_from_points(points, use_ransac=False, max_iterations=100, distance_thre
 
     return centroid, quaternion
 
-def quat_vel_to_rpy(velocity):
+def get_ccw_angle(a, b):
     """
-    Convert velocity + quaternion to RPY.
-    Roll and pitch are always 0.0, yaw depends on velocity.
+    Returns the counterclockwise angle from vector a to b in radians,
+    in the range [0, 2*pi).
+    
+    a, b: iterables like [x, y]
     """
-    vx, vy, vz = velocity
+    x1, y1 = a
+    x2, y2 = b
 
-    # Default yaw = 0 if velocity is zero
-    if abs(vx) < 1e-6 and abs(vy) < 1e-6:
-        yaw = 0.0
-    else:
-        # atan2 gives direction of velocity in the XY plane
-        vel_yaw = np.degrees(np.arctan2(vy, vx))
+    # dot product
+    dot = x1 * x2 + y1 * y2
 
-        yaw = vel_yaw + 90.0
+    # 2D cross product (z-component)
+    cross = x1 * y2 - y1 * x2
 
-    return [180.0, 0.0, yaw]
+    # signed angle (-pi, pi]
+    theta = math.atan2(cross, dot)
 
-def quat_vel_to_rpy_yaw(velocity):
-    """
-    Convert velocity + quaternion to RPY.
-    Roll and pitch are always 0.0, yaw depends on velocity.
-    """
-    vx, vy, vz = velocity
+    # normalize to [0, 2*pi)
+    if theta < 0:
+        theta += 2 * math.pi
 
-    # Default yaw = 0 if velocity is zero
-    if abs(vx) < 1e-6 and abs(vy) < 1e-6:
-        yaw = 0.0
-    else:
-        # atan2 gives direction of velocity in the XY plane
-        vel_yaw = np.degrees(np.arctan2(vy, vx))
-
-        yaw = vel_yaw + 90.0
-
-    return float(yaw)
-
-def is_within_range(value: float, target: float, deviation: float) -> bool:
-    if value is None:
-        return True
-    else:
-        return math.isclose(value, target, abs_tol=deviation)
-
-
+    return theta
 
 def edit_condition(input, arguments):
     if "action_name" in arguments:
@@ -177,16 +232,123 @@ def edit_condition(input, arguments):
                         'value': arguments["value"],
                         'operator': arguments["operator"]}
                 else:
-                 input["KINOVA_GEN3_2_RIGHT"][arguments["condition_type"]]["constraints"][x] = {
+                    input["KINOVA_GEN3_2_RIGHT"][arguments["condition_type"]]["constraints"][x] = {
                         'type': arguments["type"],
                         'value': arguments["value"],
                         'operator': arguments["operator"]}
-                return input
-    else: return input
+                break
+    return input
 
+def offset_points(points, edge_uv, distance, side='left'):
+    """
+    Offset points by a certain distance in the direction perpendicular to edge_uv.
+    
+    :param points: list of (x, y) tuples representing points to offset
+    :param edge_uv: tuple (ux, uy) representing unit vector along the edge direction
+    :param distance: how much to offset the points (same units as points)
+    :param side: 'left' or 'right' to determine which perpendicular direction to use
+    """
+    
+    t = np.asarray(edge_uv, dtype=float)
+    t = t / np.linalg.norm(t)
+
+    if side == 'left':
+        n = np.array([-t[1], t[0]])
+    elif side == 'right':
+        n = np.array([t[1], -t[0]])
+    else:
+        raise ValueError("side must be 'left' or 'right'")
+
+    return np.asarray(points) + distance * n
+
+def resolve_orientation(dir_of_motion, orientation_input: OrientationInput) -> List[float]:
+    """
+    Resolve desired orientation based on direction of motion and user input.
+    
+    :param dir_of_motion: Tuple (dx, dy) representing direction of motion in 2D plane
+    :param orientation_input: User input for desired orientation relative to direction of motion
+    
+    Returns:
+        Quaternion [x, y, z, w] representing desired orientation for action execution
+    """
+    # TODO: check if this is correct and consistent with the coordinate frame used for action execution
+    
+    dx, dy = dir_of_motion
+    norm = float(np.hypot(dx, dy))
+    if norm == 0:
+        raise ValueError("Zero direction vector")
+
+    dx, dy = dx / norm, dy / norm
+
+    if orientation_input == OrientationInput.IN_DIR_MOTION:
+        x = np.array([dx, dy, 0])
+    elif orientation_input == OrientationInput.AGAINST_DIR_MOTION:
+        x = np.array([-dx, -dy, 0])
+    elif orientation_input == OrientationInput.RIGHT_OF_DIR_MOTION:
+        x = np.array([dy, -dx, 0])
+    elif orientation_input == OrientationInput.LEFT_OF_DIR_MOTION:
+        x = np.array([-dy, dx, 0])
+    else:
+        x = np.array([dx, dy, 0])
+
+    z = np.array([0, 0, -1])
+    y = np.cross(z, x)
+
+    # Normalize y (important!)
+    y = y / np.linalg.norm(y)
+
+    # Recompute x to ensure orthogonality
+    x = np.cross(y, z)
+
+    rot_matrix = np.column_stack((x, y, z))
+    
+    # rotate rotation matrix by -90 degrees along z-axis, since the x-axis of the frame at the end-effector is at 90 degrees 
+    # to base_link when camera is facing along x-axis of end-effector
+    rot_z_neg_90 = R.from_euler('z', -90, degrees=True).as_matrix()
+    rot_matrix = rot_matrix @ rot_z_neg_90
+    
+    quat = R.from_matrix(rot_matrix).as_quat()
+
+    return quat.tolist()
+
+
+def _prune_unused_constraints(template, condition_type):
+    """
+    Remove unused constraint placeholders from a motion specification template.
+    Keeps only constraints up to the constraint_count value.
+    
+    :param template: Motion specification template dictionary
+    :param condition_type: Type of condition to prune ('POST_CONDITION', 'PRE_CONDITION', etc.)
+    """
+    conditions = template["KINOVA_GEN3_2_RIGHT"].get(condition_type, {})
+    if not conditions or 'constraints' not in conditions:
+        return template
+    
+    constraints = conditions['constraints']
+    constraint_count = conditions.get('constraint_count', 0)
+    
+    # Remove all constraints beyond constraint_count
+    # Handle both int and str keys (dict keys can be either depending on how they were created)
+    keys_to_remove = []
+    for k in constraints.keys():
+        try:
+            key_value = int(k) if isinstance(k, str) else k
+            if key_value > constraint_count:
+                keys_to_remove.append(k)
+        except (ValueError, TypeError):
+            # Skip keys that can't be converted to int
+            pass
+    
+    for key in keys_to_remove:
+        del constraints[key]
+    
+    return template
+
+
+## functions to create motion specifications for different action types
 
 def make_action_goal_move(position, orientation, frame_name="marker_frame_0"):
-    current_template = Templates.move
+    current_template = copy.deepcopy(Templates.move)
     tolerance = 0.01
 
     px, py, pz = position
@@ -244,9 +406,8 @@ def make_action_goal_move(position, orientation, frame_name="marker_frame_0"):
 
     return str(current_template)
 
-
-def make_action_goal_touch(velocity, orientation, action_name="touch_neutral", frame_name="eddie_base_link", min_contact_time=2.0):
-    current_template = Templates.touch
+def make_action_goal_touch(velocity, orientation, action_name="touch_neutral", frame_name="eddie_base_link", min_contact_time=1.0):
+    current_template = copy.deepcopy(Templates.touch)
     velocity_x, velocity_y, velocity_z = velocity
     # Convert numpy types to Python native types
     velocity_x = float(velocity_x) if velocity_x is not None else None
@@ -346,23 +507,28 @@ def make_action_goal_touch(velocity, orientation, action_name="touch_neutral", f
 
     return str(current_template)
 
-
-def make_action_goal_slide(velocity, force, orientation, action_name="slide_to_explore_plane", frame_name="eddie_base_link", time=1.5):
+def make_action_goal_slide(position=[None, None, None], velocity=[None, None, None], force=[None, None, None], orientation=None, action_name="slide_to_explore_plane", frame_name="eddie_base_link", time=1.5):
     """
     position is the id of constraint to be updated
     """
-    
-    current_template = Templates.slide
+    current_template = copy.deepcopy(Templates.slide)
 
-    velocity = list(velocity)
     # Convert numpy types to Python native types
     velocity = [float(v) if v is not None else None for v in velocity]
-    velocity_x, velocity_y, velocity_z = velocity
     vel_opr_list = [eq if v is not None else None for v in velocity]
+    
+    position = [float(p) if p is not None else None for p in position]
+    pos_opr_list = [eq if p is not None else None for p in position]
     
     force = [float(f) if f is not None else None for f in force]
     force_opr_list = [eq if f is not None else None for f in force]
 
+    force_magnitude = np.linalg.norm([f for f in force if f is not None])
+    unit_vector_of_force = [(f / force_magnitude) if (f is not None and force_magnitude > 0) else None
+                            for f in force]
+    velocity_spike_threshold = 0.1
+    velocity_spike_threshold_vector = [float(velocity_spike_threshold * uv) if uv is not None else None for uv in unit_vector_of_force]
+    
     if orientation:
         qx, qy, qz, qw = orientation
         qx = float(qx) if qx is not None else None
@@ -394,11 +560,19 @@ def make_action_goal_slide(velocity, force, orientation, action_name="slide_to_e
         "value": force,
         "operator": force_opr_list
     })
+    
+    current_template = edit_condition(current_template, {
+        "condition_type": "PER_CONDITION",
+        "position": 3,
+        "type": "POSITION_XYZ",
+        "value": position,
+        "operator": pos_opr_list
+    })
 
     if orientation:
         current_template = edit_condition(current_template, {
             "condition_type": "PER_CONDITION",
-            "position": 3,
+            "position": 4,
             "type": "ORIENTATION_QUATERNION",
             "value": [qx, qy, qz, qw],
             "operator": [eq, eq, eq, eq]
@@ -406,136 +580,15 @@ def make_action_goal_slide(velocity, force, orientation, action_name="slide_to_e
     else:
         current_template = edit_condition(current_template, {
             "condition_type": "PER_CONDITION",
-            "position": 3,
+            "position": 4,
             "type": "ORIENTATION_QUATERNION",
             "value": [None, None, None, None],
             "operator": [None, None, None, None]
         })
-
-    if action_name == "slide_plane_single" or action_name == "slide_plane_multiple":
-
-        #Calculate variables
-        min_velocity = 0.01
-
-        if abs(velocity_x) >= abs(velocity_y):
-            # X is dominant
-            x_post = -min_velocity if velocity_x < 0 else min_velocity
-            op_x = gt if velocity_x < 0 else lt
-            y_post, op_y = None, None
-        else:
-            # Y is dominant
-            y_post = -min_velocity if velocity_y < 0 else min_velocity
-            op_y = gt if velocity_y < 0 else lt
-            x_post, op_x = None, None
-
-        current_template = edit_condition(current_template, {
-            "condition_type": "POST_CONDITION",
-            "number_of_disjunctions": 3,
-            "disjunction_id": 1,
-            "position": 1,
-            "type": "VELOCITY_XYZ",
-            "value": [None, None, -0.03],
-            "operator": [None, None, lt]
-        })
-
-        current_template = edit_condition(current_template, {
-            "condition_type": "POST_CONDITION",
-            "disjunction_id": 1,
-            "position": 2,
-            "type": "POSITION_XYZ",
-            "value": [None, None, -0.03],
-            "operator": [None, None, lt]
-        })
-
-        current_template = edit_condition(current_template, {
-            "condition_type": "POST_CONDITION",
-            "disjunction_id": 2,
-            "position": 3,
-            "type": "VELOCITY_XYZ",
-            "value": [x_post, y_post, None],
-            "operator": [op_x, op_y, None]
-        })
-
-        current_template = edit_condition(current_template, {
-            "condition_type": "POST_CONDITION",
-            "disjunction_id": 2,
-            "position": 4,
-            "type": "TIME_LIMIT",
-            "value": 0.5,
-            "operator": gt
-        })
-
-        current_template = edit_condition(current_template, {
-            "condition_type": "POST_CONDITION",
-            "disjunction_id": 3,
-            "position": 5,
-            "type": "POSITION_XYZ",
-            "value": [None, None, -0.03],
-            "operator": [None, None, lt]
-        })
-
-        current_template = edit_condition(current_template, {
-            "condition_type": "POST_CONDITION",
-            "disjunction_id": 3,
-            "position": 6,
-            "type": "TIME_LIMIT",
-            "value": 1.0,
-            "operator": gt
-        })
-
-
-    elif action_name == "slide_edge":
-        min_velocity = 0.1
-
-        if abs(velocity_x) >= abs(velocity_y):
-            # X is dominant
-            x_post = min_velocity if velocity_x < 0 else -min_velocity
-            op_x = gt if velocity_x < 0 else lt
-            y_post, op_y = None, None
-        else:
-            # Y is dominant
-            y_post = min_velocity if velocity_y < 0 else -min_velocity
-            op_y = gt if velocity_y < 0 else lt
-            x_post, op_x = None, None
-        
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "number_of_disjunctions": 3,
-                "disjunction_id": 1,
-                "position": 1,
-                "type": "VELOCITY_XYZ",
-                "value": [x_post, y_post, None],
-                "operator": [op_x, op_y, None]
-            })
-
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "disjunction_id": 2,
-                "position": 2,
-                "type": "TIME_LIMIT",
-                "value": time,
-                "operator": gt
-            })
-
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "disjunction_id": 3,
-                "position": 3,
-                "type": "TIME_LIMIT",
-                "value": time,
-                "operator": gt
-            })
-
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "disjunction_id": 4,
-                "position": 4,
-                "type": "TIME_LIMIT",
-                "value": time,
-                "operator": gt
-            })
-
-    elif action_name == "slide_to_explore_plane":
+    
+    if (action_name == "slide_to_explore_plane" or 
+        action_name=="find_edge_by_sliding" or 
+        action_name == "slide_against_surface_vector_only"):
         """
         disjunction 1: slide over surface until time limit (to explore plane)
         """
@@ -554,6 +607,7 @@ def make_action_goal_slide(velocity, force, orientation, action_name="slide_to_e
         """
         disjunction 1: slide until contact with a surface where dihedral angle=90
         disjunction 2: slide until contact with a surface where dihedral angle=270
+        Note: this action is not used when reflexivity is unknown;
         """
         
         vel_tolerance = 0.005
@@ -610,14 +664,172 @@ def make_action_goal_slide(velocity, force, orientation, action_name="slide_to_e
                 "disjunction_id": 2,
                 "position": 6,
                 "type": "POSITION_XYZ",
+                "value": [None, None, -0.015],
+                "operator": [None, None, lt]
+            })
+
+    elif action_name == "slide_against_edge_until_corner":
+        """
+        disjunction 1 (against edge)    : reflexive corner
+        disjunction 2 (against edge)    : non-reflexive corner
+        """
+        
+        vel_tolerance = 0.005
+        zero_vel_ul = vel_tolerance
+        zero_vel_ll = -vel_tolerance
+        
+        # disjunction 1
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "number_of_disjunctions": 2,
+                "constraint_count": 7,
+                "disjunction_id": 1,
+                "position": 1,
+                "type": "VELOCITY_XYZ",
+                "value": [zero_vel_ul, zero_vel_ul, zero_vel_ul],
+                "operator": [lt, lt, lt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 1,
+                "position": 2,
+                "type": "VELOCITY_XYZ",
+                "value": [zero_vel_ll, zero_vel_ll, zero_vel_ll],
+                "operator": [gt, gt, gt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 1,
+                "position": 3,
+                "type": "POSITION_XYZ",
                 "value": [None, None, -0.01],
                 "operator": [None, None, lt]
             })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 1,
+                "position": 4,
+                "type": "TIME_LIMIT",
+                "value": 2.0,
+                "operator": gt
+            })
+        
+        # disjunction 2
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 2,
+                "position": 5,
+                "type": "VELOCITY_XYZ",
+                "value": [velocity_spike_threshold_vector[0], velocity_spike_threshold_vector[1], None],
+                "operator": [gt, gt, None]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 2,
+                "position": 6,
+                "type": "POSITION_XYZ",
+                "value": [None, None, -0.01],
+                "operator": [None, None, lt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 2,
+                "position": 7,
+                "type": "TIME_LIMIT",
+                "value": 2.0,
+                "operator": gt
+            })
+
+    elif action_name == "slide_against_vertical_surface_until_corner":
+        """
+        disjunction 1 (against vertical surface)  : slide until edge where dihedral angle=90; non-reflexive corner;
+        disjunction 2 (against vertical surface)  : slide until edge where dihedral angle=270; non-reflexive corner;
+        disjunction 3 (against vertical surface)  : slide until edge where reflexive corner;
+        """
+        
+        vel_tolerance = 0.005
+        zero_vel_ul = vel_tolerance
+        zero_vel_ll = -vel_tolerance
+        
+        # disjunction 1
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "number_of_disjunctions": 3,
+                "constraint_count": 8,
+                "disjunction_id": 1,
+                "position": 1,
+                "type": "VELOCITY_XYZ",
+                "value": [zero_vel_ul, zero_vel_ul, zero_vel_ul],
+                "operator": [lt, lt, lt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 1,
+                "position": 2,
+                "type": "VELOCITY_XYZ",
+                "value": [zero_vel_ll, zero_vel_ll, zero_vel_ll],
+                "operator": [gt, gt, gt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 1,
+                "position": 3,
+                "type": "POSITION_XYZ",
+                "value": [None, None, -0.01],
+                "operator": [None, None, gt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 1,
+                "position": 4,
+                "type": "TIME_LIMIT",
+                "value": 2.0,
+                "operator": gt
+            })
+
+        # disjunction 2
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 2,
+                "position": 5,
+                "type": "VELOCITY_XYZ",
+                "value": [None, None, -0.015],
+                "operator": [None, None, lt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 2,
+                "position": 6,
+                "type": "POSITION_XYZ",
+                "value": [None, None, -0.01],
+                "operator": [None, None, lt]
+            })
+        
+        # disjunction 3
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 3,
+                "position": 7,
+                "type": "VELOCITY_XYZ",
+                "value": [velocity_spike_threshold_vector[0], velocity_spike_threshold_vector[1], None],
+                "operator": [gt, gt, None]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 3,
+                "position": 8,
+                "type": "POSITION_XYZ",
+                "value": [None, None, -0.01],
+                "operator": [None, None, gt]
+            })
+    
+    # Prune unused constraint placeholders before returning
+    current_template = _prune_unused_constraints(current_template, "POST_CONDITION")
     return str(current_template)
 
 
 def make_action_goal_yaw(position, yaw=0.0, yaw_threshold=0.1, frame_name="eddie_base_link", time_limit=5.0):
-    current_template = Templates.yaw
+    current_template = copy.deepcopy(Templates.yaw)
 
     pos_x, pos_y, pos_z = position
     # Convert numpy types to Python native types

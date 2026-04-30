@@ -220,11 +220,11 @@ slide = {
         }
     },
     "PER_CONDITION": {
-        'constraint_count': 3,
+        'constraint_count': 4,
         'constraints': {
             1: {
                 'type': 'VELOCITY_XYZ',
-                'value': [0.6, -0.5, 0.00],
+                'value': [0.0, 0.0, 0.0],
                 'operator': ['EQUAL', 'EQUAL', 'EQUAL']
             },
             2: {
@@ -233,6 +233,11 @@ slide = {
                 'operator': [None, None, None]
             },
             3: {
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            4: {
                 'type': 'ORIENTATION_QUATERNION',
                 'value': [0.5, 0.4999999999999999, 0.5, 0.5000000000000001],
                 'operator': ['EQUAL', 'EQUAL', 'EQUAL', 'EQUAL']
@@ -240,7 +245,7 @@ slide = {
         }
     },
     "POST_CONDITION": {
-        'constraint_count': 6,
+        'constraint_count': 15,
         'number_of_disjunctions': 6,
         'constraints': {
             1: {
@@ -274,6 +279,60 @@ slide = {
                 'operator': [None, None, None]
             },
             6: {
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            7: {
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            8: {
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            9: {
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            10: {
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            11: {
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            12: {
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            13: {
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            14: {
+                'disjunction_id': 1,
+                'type': 'POSITION_XYZ',
+                'value': [None, None, None],
+                'operator': [None, None, None]
+            },
+            15: {
                 'disjunction_id': 1,
                 'type': 'POSITION_XYZ',
                 'value': [None, None, None],
