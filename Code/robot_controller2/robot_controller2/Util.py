@@ -1,7 +1,7 @@
 import os
 import subprocess
 import math
-from typing import List
+from typing import List, Tuple
 from robot_controller2 import Templates
 from enum import Enum
 import numpy as np
@@ -261,7 +261,7 @@ def offset_points(points, edge_uv, distance, side='left'):
 
     return np.asarray(points) + distance * n
 
-def resolve_orientation(dir_of_motion, orientation_input: OrientationInput) -> List[float]:
+def resolve_orientation(dir_of_motion, orientation_input: OrientationInput) -> Tuple[List[float], float]:
     """
     Resolve desired orientation based on direction of motion and user input.
     
@@ -269,9 +269,10 @@ def resolve_orientation(dir_of_motion, orientation_input: OrientationInput) -> L
     :param orientation_input: User input for desired orientation relative to direction of motion
     
     Returns:
-        Quaternion [x, y, z, w] representing desired orientation for action execution
+        Tuple of (quaternion [x, y, z, w], yaw angle in radians) where:
+        - quaternion: [x, y, z, w] representing desired orientation for action execution
+        - yaw: yaw angle extracted from the quaternion in radians
     """
-    # TODO: check if this is correct and consistent with the coordinate frame used for action execution
     
     dx, dy = dir_of_motion
     norm = float(np.hypot(dx, dy))
@@ -308,8 +309,11 @@ def resolve_orientation(dir_of_motion, orientation_input: OrientationInput) -> L
     rot_matrix = rot_matrix @ rot_z_neg_90
     
     quat = R.from_matrix(rot_matrix).as_quat()
+    
+    # extract yaw angle from quaternion (rotation around z-axis)
+    yaw = float(R.from_quat(quat).as_euler('zyx')[0])
 
-    return quat.tolist()
+    return quat.tolist(), yaw
 
 
 def _prune_unused_constraints(template, condition_type):
@@ -526,8 +530,14 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
     force_magnitude = np.linalg.norm([f for f in force if f is not None])
     unit_vector_of_force = [(f / force_magnitude) if (f is not None and force_magnitude > 0) else None
                             for f in force]
-    velocity_spike_threshold = 0.1
+    velocity_spike_threshold = 0.06
     velocity_spike_threshold_vector = [float(velocity_spike_threshold * uv) if uv is not None else None for uv in unit_vector_of_force]
+    velocity_spike_opr_list = [
+        gt if uv is not None and uv > 0
+        else lt if uv is not None and uv < 0
+        else None
+        for uv in unit_vector_of_force
+    ]
     
     if orientation:
         qx, qy, qz, qw = orientation
@@ -587,7 +597,7 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
         })
     
     if (action_name == "slide_to_explore_plane" or 
-        action_name=="find_edge_by_sliding" or 
+        action_name == "find_edge_by_sliding" or 
         action_name == "slide_against_surface_vector_only"):
         """
         disjunction 1: slide over surface until time limit (to explore plane)
@@ -610,9 +620,9 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
         Note: this action is not used when reflexivity is unknown;
         """
         
-        vel_tolerance = 0.005
-        zero_vel_ul = vel_tolerance
-        zero_vel_ll = -vel_tolerance
+        zero_vel_threshold = 0.001
+        zero_vel_ul = zero_vel_threshold
+        zero_vel_ll = -zero_vel_threshold
         
         # disjunction 1
         current_template = edit_condition(current_template, {
@@ -721,7 +731,7 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
                 "position": 5,
                 "type": "VELOCITY_XYZ",
                 "value": [velocity_spike_threshold_vector[0], velocity_spike_threshold_vector[1], None],
-                "operator": [gt, gt, None]
+                "operator": velocity_spike_opr_list
             })
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
@@ -828,7 +838,7 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
     return str(current_template)
 
 
-def make_action_goal_yaw(position, yaw=0.0, yaw_threshold=0.1, frame_name="eddie_base_link", time_limit=5.0):
+def make_action_goal_yaw(position, yaw=0.0, yaw_threshold=0.1, frame_name="eddie_base_link", time_limit=15.0):
     current_template = copy.deepcopy(Templates.yaw)
 
     pos_x, pos_y, pos_z = position

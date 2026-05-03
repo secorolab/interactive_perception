@@ -365,6 +365,7 @@ class ReasonerNode(ROSNode):
         self.dir_of_sliding_motion_2d = None
         self.distance_threshold_for_motion_detection = self.config['motion']['distance_threshold_for_motion_detection']
         self.sliding_variables_initialized = False
+        self.action_name_str = None
         
         self.exploration_complete = False
         self.current_ref_edge_index = None
@@ -554,12 +555,13 @@ class ReasonerNode(ROSNode):
             fy = self.force_along_edge_to_find_slope * new_dy
 
             force_vector = [fx, fy, force_in_z_direction]
+            self.action_name_str = "find_edge_by_sliding"
             
             ms_to_execute = Util.make_action_goal_slide(
                 position=[None, None, position_in_z_direction],
                 force=force_vector,
                 orientation=self.desired_orientation,
-                action_name="find_edge_by_sliding",
+                action_name=self.action_name_str,
                 frame_name="marker_frame_0",
                 time=1.0
             )
@@ -570,38 +572,38 @@ class ReasonerNode(ROSNode):
             
             if self.current_action_spec.stop == Stop.UNTIL_CORNER:
                 if self.current_action_spec.mode == Mode.AGAINST_EDGE:
-                    action_name_str = "slide_against_edge_until_corner"
+                    self.action_name_str = "slide_against_edge_until_corner"
                 elif self.current_action_spec.mode == Mode.AGAINST_VERTICAL:
-                    action_name_str = "slide_against_vertical_surface_until_corner"
+                    self.action_name_str = "slide_against_vertical_surface_until_corner"
             elif self.current_action_spec.stop == Stop.VECTOR_ONLY:
                 # only when it is vector only, the time parameter in motion spec is used
-                action_name_str = "slide_against_surface_vector_only"
+                self.action_name_str = "slide_against_surface_vector_only"
 
             if self.current_action_spec.mode == Mode.AGAINST_EDGE:                
                 # rotate dir of velocity by 90 degrees to get foce vector for sliding against edge
                 dir_of_force = (-self.dir_of_sliding_motion_2d[1], self.dir_of_sliding_motion_2d[0]) # 90 degree rotation in the frame of base_link
                 
                 if self.current_action_spec.direction == Direction.CCK:    
-                    self.desired_orientation = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.RIGHT_OF_DIR_MOTION)
+                    self.desired_orientation, _ = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.RIGHT_OF_DIR_MOTION)
                     ms_to_execute = Util.make_action_goal_slide(
                         position=[None, None, -self.offset_below_surface],
                         velocity=[self.slide_velocity*self.dir_of_sliding_motion_2d[0], self.slide_velocity*self.dir_of_sliding_motion_2d[1], None],
                         force=[self.force_against_surface * dir_of_force[0], self.force_against_surface * dir_of_force[1], None],
                         orientation=self.desired_orientation,
-                        action_name=action_name_str,
+                        action_name=self.action_name_str,
                         frame_name="marker_frame_0",
                         time=3.0
                     )
                     self.last_direction_of_motion = [self.dir_of_sliding_motion_2d[0], self.dir_of_sliding_motion_2d[1], 0.0]
                     self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 elif self.current_action_spec.direction == Direction.CK:
-                    self.desired_orientation = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.LEFT_OF_DIR_MOTION)
+                    self.desired_orientation, _ = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.LEFT_OF_DIR_MOTION)
                     ms_to_execute = Util.make_action_goal_slide(
                         position=[None, None, -self.offset_below_surface],
                         velocity=[-self.slide_velocity*self.dir_of_sliding_motion_2d[0], -self.slide_velocity*self.dir_of_sliding_motion_2d[1], None],
                         force=[-self.force_against_surface * dir_of_force[0], -self.force_against_surface * dir_of_force[1], None],
                         orientation=self.desired_orientation,
-                        action_name=action_name_str,
+                        action_name=self.action_name_str,
                         frame_name="marker_frame_0",
                         time=3.0
                     )
@@ -613,24 +615,24 @@ class ReasonerNode(ROSNode):
                 dir_of_force = (self.dir_of_sliding_motion_2d[1], -self.dir_of_sliding_motion_2d[0]) # -90 degree rotation in the frame of base_link
                 
                 if self.current_action_spec.direction == Direction.CCK:    
-                    self.desired_orientation = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.LEFT_OF_DIR_MOTION)
+                    self.desired_orientation, _ = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.LEFT_OF_DIR_MOTION)
                     ms_to_execute = Util.make_action_goal_slide(
                         velocity=[self.slide_velocity*self.dir_of_sliding_motion_2d[0], self.slide_velocity*self.dir_of_sliding_motion_2d[1], None],
                         force=[self.force_against_surface * self.dir_of_force[0], self.force_against_surface * self.dir_of_force[1], self.force_against_surface],
                         orientation=self.desired_orientation,
-                        action_name=action_name_str,
+                        action_name=self.action_name_str,
                         frame_name="marker_frame_0",
                         time=3.0
                     )
                     self.last_direction_of_motion = [self.dir_of_sliding_motion_2d[0], self.dir_of_sliding_motion_2d[1], 0.0]
                     self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 elif self.current_action_spec.direction == Direction.CK:
-                    self.desired_orientation = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.RIGHT_OF_DIR_MOTION)
+                    self.desired_orientation, _ = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.RIGHT_OF_DIR_MOTION)
                     ms_to_execute = Util.make_action_goal_slide(
                         velocity=[-self.slide_velocity*self.dir_of_sliding_motion_2d[0], -self.slide_velocity*self.dir_of_sliding_motion_2d[1], None],
                         force=[-self.force_against_surface * self.dir_of_force[0], -self.force_against_surface * self.dir_of_force[1], self.force_against_surface],
                         orientation=self.desired_orientation,
-                        action_name=action_name_str,
+                        action_name=self.action_name_str,
                         frame_name="marker_frame_0",
                         time=3.0
                     )
@@ -801,7 +803,7 @@ class ReasonerNode(ROSNode):
         
         # TODO: for extending to multiple surfaces, introduces indices and access plane slope information via reference index
         if not self.plane_slope_estimated:
-            action_name_str = "slide_to_explore_plane"
+            self.action_name_str = "slide_to_explore_plane"
             self.get_logger().info("Plane slope estimated: generating default action to estimate plane slope")
             
             # ideally, this depends on the initial belief of slope of plane wrt eddie_base_link
@@ -815,25 +817,25 @@ class ReasonerNode(ROSNode):
                 Util.make_action_goal_slide(velocity=[self.slide_velocity,  0.0,  None], 
                                             force = [None, None, -self.force_against_surface], 
                                             orientation = self.desired_orientation, 
-                                            action_name=action_name_str, 
+                                            action_name=self.action_name_str, 
                                             frame_name="eddie_base_link", 
                                             time=2.0),                
                 Util.make_action_goal_slide(velocity=[0.0,   self.slide_velocity, None], 
                                             force = [None, None, -self.force_against_surface], 
                                             orientation = self.desired_orientation, 
-                                            action_name=action_name_str, 
+                                            action_name=self.action_name_str, 
                                             frame_name="eddie_base_link", 
                                             time=3.0),
                 Util.make_action_goal_slide(velocity=[-self.slide_velocity, 0.0,  None], 
                                             force = [None, None, -self.force_against_surface], 
                                             orientation = self.desired_orientation, 
-                                            action_name=action_name_str, 
+                                            action_name=self.action_name_str, 
                                             frame_name="eddie_base_link", 
                                             time=2.0),
                 Util.make_action_goal_slide(velocity=self.desired_velocity, 
                                             force = [None, None, -self.force_against_surface], 
                                             orientation = self.desired_orientation, 
-                                            action_name=action_name_str, 
+                                            action_name=self.action_name_str, 
                                             frame_name="eddie_base_link", 
                                             time=3.0)
             ] # use points collected from these motions to estimate slope
@@ -886,7 +888,7 @@ class ReasonerNode(ROSNode):
                 elif answer in ("no", "n"):
                     print("Stopping.")
                     self.stop_execution = True
-                    break
+                    return
                 else:
                     attempt += 1
                     if attempt < num_attempts_allowed: print(f"Invalid input. You have {num_attempts_allowed - attempt} attempts left.")
@@ -923,9 +925,10 @@ class ReasonerNode(ROSNode):
                 point_on_plane = (closest_pt_on_edge[0] + perp_direction[0]*offset_from_edge, closest_pt_on_edge[1] + perp_direction[1]*offset_from_edge)
                 
                 # determine desired orientation based on direction of motion and user input
-                self.desired_orientation = Util.resolve_orientation(opp_to_perp_direction, self.orientation_input)
+                self.desired_orientation, desired_yaw = Util.resolve_orientation(opp_to_perp_direction, self.orientation_input)
                 self.desired_velocity = [self.slide_velocity*opp_to_perp_direction[0], self.slide_velocity*opp_to_perp_direction[1], None]
                 
+                self.action_name_str = "slide_until_edge"
                 self.last_direction_of_motion = [opp_to_perp_direction[0], opp_to_perp_direction[1], 0.0]
                 action_list = [
                         # move above point on plane by offset_above_surface
@@ -936,6 +939,11 @@ class ReasonerNode(ROSNode):
                                                    orientation = self.current_orientation, 
                                                    frame_name="marker_frame_0"),
                         
+                        # attain desired yaw
+                        Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
+                                                  yaw = desired_yaw,
+                                                  frame_name="marker_frame_0"),
+                        
                         # touch table
                         Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
                                                     orientation=self.desired_orientation,
@@ -945,7 +953,7 @@ class ReasonerNode(ROSNode):
                         Util.make_action_goal_slide(velocity=self.desired_velocity, 
                                                     force = [None, None, -self.force_against_surface], 
                                                     orientation = self.desired_orientation, 
-                                                    action_name="slide_until_edge", 
+                                                    action_name=self.action_name_str, 
                                                     frame_name="marker_frame_0")
                 ]
 
@@ -953,15 +961,35 @@ class ReasonerNode(ROSNode):
             
             elif self.current_action_type == ActionType.SLIDE_OVER_SURFACE_UNTIL_EDGE:
                 # slide in default direction (positive x-axis of marker frame 0) until edge is reached
-                self.desired_orientation = Util.resolve_orientation(dir_of_motion=(1, 0), orientation_input=self.orientation_input)
+                self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=(1, 0), orientation_input=self.orientation_input)
                 self.desired_velocity = [self.slide_velocity, 0.0, None]
                 
                 self.last_direction_of_motion = [1.0, 0.0, 0.0]
+                
+                # Note: current_position is in the frame of previous motion specification.
+                # Thus, instead of using current_position, using [0, 0, 0]
+                if self.action_name_str=="slide_to_explore_plane":
+                    desired_pos_while_setting_yaw = [0.0, 0.0, self.offset_above_surface]
+                else:
+                    desired_pos_while_setting_yaw = [self.current_position[0], self.current_position[1], self.offset_above_surface]
+                
+                self.action_name_str = "slide_until_edge"
                 action_list = [
+                        # attain desired yaw
+                        Util.make_action_goal_yaw(position=desired_pos_while_setting_yaw, 
+                                                  yaw = desired_yaw,
+                                                  frame_name="marker_frame_0"),
+                        
+                        # touch table
+                        Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
+                                                    orientation=self.desired_orientation, 
+                                                    frame_name="marker_frame_0"),
+                        
+                        # slide until edge is reached
                         Util.make_action_goal_slide(velocity=self.desired_velocity, 
                                                     force = [None, None, -self.force_against_surface], 
                                                     orientation = self.desired_orientation, 
-                                                    action_name="slide_until_edge", 
+                                                    action_name=self.action_name_str, 
                                                     frame_name="marker_frame_0")
                 ]
                 return action_list
@@ -984,10 +1012,11 @@ class ReasonerNode(ROSNode):
                 point_on_edge = points_on_edge[-1]
                 point_on_plane = (point_on_edge[0] + perp_direction[0]*self.slide_offset_from_edge, point_on_edge[1] + perp_direction[1]*self.slide_offset_from_edge)
                 
-                self.desired_orientation = Util.resolve_orientation(dir_of_motion=edge_uv, orientation_input=self.orientation_input)
+                self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=edge_uv, orientation_input=self.orientation_input)
                 self.desired_velocity = [self.slide_velocity*edge_uv[0], self.slide_velocity*edge_uv[1], None]
                 
                 self.last_direction_of_motion = [edge_uv[0], edge_uv[1], 0.0]
+                self.action_name_str = "slide_until_edge"
                 action_list = [
                     # move to a point offset from edge to slide parallel to edge
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
@@ -997,6 +1026,10 @@ class ReasonerNode(ROSNode):
                                                 orientation = self.current_orientation,
                                                 frame_name="marker_frame_0"),
                     
+                    # attain desired yaw
+                    Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
+                                                yaw = desired_yaw,
+                                                frame_name="marker_frame_0"),
                     # touch table
                     Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
                                                 orientation=self.desired_orientation, 
@@ -1006,7 +1039,7 @@ class ReasonerNode(ROSNode):
                     Util.make_action_goal_slide(velocity=self.desired_velocity, 
                                                 force = [None, None, -self.force_against_surface], 
                                                 orientation = self.desired_orientation, 
-                                                action_name="slide_until_edge", 
+                                                action_name=self.action_name_str, 
                                                 frame_name="marker_frame_0")
                 ]
                 return action_list
@@ -1025,10 +1058,11 @@ class ReasonerNode(ROSNode):
                 point_on_edge = points_on_edge[0]
                 point_on_plane = (point_on_edge[0] + perp_direction[0]*self.slide_offset_from_edge, point_on_edge[1] + perp_direction[1]*self.slide_offset_from_edge)
                 
-                self.desired_orientation = Util.resolve_orientation(dir_of_motion=edge_uv_ck, orientation_input=self.orientation_input)
+                self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=edge_uv_ck, orientation_input=self.orientation_input)
                 self.desired_velocity = [self.slide_velocity*edge_uv_ck[0], self.slide_velocity*edge_uv_ck[1], None]
                 
                 self.last_direction_of_motion = [edge_uv_ck[0], edge_uv_ck[1], 0.0]
+                self.action_name_str = "slide_until_edge"
                 action_list = [
                     # move to a point offset from edge to slide parallel to edge
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
@@ -1037,7 +1071,10 @@ class ReasonerNode(ROSNode):
                     Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
                                                 orientation = self.current_orientation,
                                                 frame_name="marker_frame_0"),
-                    
+                    # attain desired yaw
+                    Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
+                                                yaw = desired_yaw,
+                                                frame_name="marker_frame_0"),
                     # touch table
                     Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
                                                 orientation=self.desired_orientation, 
@@ -1047,7 +1084,7 @@ class ReasonerNode(ROSNode):
                     Util.make_action_goal_slide(velocity=self.desired_velocity, 
                                                 force = [None, None, -self.force_against_surface], 
                                                 orientation = self.desired_orientation, 
-                                                action_name="slide_until_edge", 
+                                                action_name=self.action_name_str, 
                                                 frame_name="marker_frame_0")
                 ]
                 return action_list
@@ -1088,10 +1125,11 @@ class ReasonerNode(ROSNode):
                 point_to_traverse_in_opp_direction = (point_closest_to_start_of_edge[0] + opp_to_perp_direction[0]*0.15, point_closest_to_start_of_edge[1] + opp_to_perp_direction[1]*0.15) # point on plane with offset to best_edge
                     
                 
-                self.desired_orientation = Util.resolve_orientation(dir_of_motion=edge_uv, orientation_input=self.orientation_input)
+                self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=edge_uv, orientation_input=self.orientation_input)
                 self.desired_velocity = [self.slide_velocity*edge_uv[0], self.slide_velocity*edge_uv[1], None]
                 
                 self.last_direction_of_motion = [edge_uv[0], edge_uv[1], 0.0]
+                self.action_name_str = "slide_until_edge"
                 action_list = [
                     ## case 1: prev: slide until corner and reflexive and dihedral is 90/unknown
                     ## case 2: prev: slide against vertical until corner, and dihedral is 270
@@ -1110,6 +1148,11 @@ class ReasonerNode(ROSNode):
                                                 orientation = self.current_orientation,
                                                 frame_name="marker_frame_0"),
                     
+                    # attain desired yaw
+                    Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
+                                                yaw = desired_yaw,
+                                                frame_name="marker_frame_0"),
+                    
                     # touch table
                     Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
                                                 orientation=self.desired_orientation, 
@@ -1119,7 +1162,7 @@ class ReasonerNode(ROSNode):
                     Util.make_action_goal_slide(velocity=self.desired_velocity, 
                                                 force = [None, None, -self.force_against_surface], 
                                                 orientation = self.desired_orientation, 
-                                                action_name="slide_until_edge", 
+                                                action_name=self.action_name_str, 
                                                 frame_name="marker_frame_0")
                 ]
                 
@@ -1164,9 +1207,10 @@ class ReasonerNode(ROSNode):
                 point_to_traverse_in_opp_direction = (point_further_away_in_dir_of_edge[0] + opp_to_perp_direction[0]*0.15, point_further_away_in_dir_of_edge[1] + opp_to_perp_direction[1]*0.15) # point on plane with offset to best_edge
                     
                 
-                self.desired_orientation = Util.resolve_orientation(dir_of_motion=edge_uv_ck, orientation_input=self.orientation_input)
+                self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=edge_uv_ck, orientation_input=self.orientation_input)
                 self.desired_velocity = [self.slide_velocity*edge_uv_ck[0], self.slide_velocity*edge_uv_ck[1], None]
                 
+                self.action_name_str = "slide_until_edge"
                 self.last_direction_of_motion = [edge_uv_ck[0], edge_uv_ck[1], 0.0]
                 action_list = [
                     ## case 1: prev: slide until corner and reflexive and dihedral is 90/unknown
@@ -1186,6 +1230,11 @@ class ReasonerNode(ROSNode):
                                                 orientation = self.current_orientation,
                                                 frame_name="marker_frame_0"),
                     
+                    # attain desired yaw
+                    Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
+                                                yaw = desired_yaw,
+                                                frame_name="marker_frame_0"),
+                    
                     # touch table
                     Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
                                                 orientation=self.desired_orientation, 
@@ -1195,7 +1244,7 @@ class ReasonerNode(ROSNode):
                     Util.make_action_goal_slide(velocity=self.desired_velocity, 
                                                 force = [None, None, -self.force_against_surface], 
                                                 orientation = self.desired_orientation, 
-                                                action_name="slide_until_edge", 
+                                                action_name=self.action_name_str, 
                                                 frame_name="marker_frame_0")
                 ]
                 
@@ -1235,6 +1284,7 @@ class ReasonerNode(ROSNode):
                     point_to_move_to = (point_on_edge[0] + edge_uv[0]*self.slide_offset_from_edge, point_on_edge[1] + edge_uv[1]*self.slide_offset_from_edge) # point further away from edge in direction of edge unit vector
                     self.desired_velocity = [self.slide_velocity*desired_direction_of_motion[0], self.slide_velocity*desired_direction_of_motion[1], 0.0]
                     
+                    self.action_name_str = "touch_edge"
                     self.last_direction_of_motion = [desired_direction_of_motion[0], desired_direction_of_motion[1], 0.0]
                     action_list = [
                         Util.make_action_goal_move(position=[point_to_move_to[0], point_to_move_to[1], - self.offset_below_surface],
@@ -1243,7 +1293,7 @@ class ReasonerNode(ROSNode):
                         Util.make_action_goal_touch(velocity=self.desired_velocity,
                                                     orientation=self.current_orientation,
                                                     frame_name="marker_frame_0",
-                                                    action_name="touch_edge")
+                                                    action_name=self.action_name_str)
                     ]
                     return action_list
                 
@@ -1272,6 +1322,7 @@ class ReasonerNode(ROSNode):
                     
                     self.desired_velocity = [self.touch_velocity*desired_dir_of_vel[0], self.touch_velocity*desired_dir_of_vel[1], 0.0]
                     
+                    self.action_name_str = "touch_edge"
                     self.last_direction_of_motion = [desired_dir_of_vel[0], desired_dir_of_vel[1], 0.0]
                     action_list = [
                         Util.make_action_goal_move(position=[offset_position[0], offset_position[1], 0.0],
@@ -1283,7 +1334,7 @@ class ReasonerNode(ROSNode):
                         Util.make_action_goal_touch(velocity=self.desired_velocity,
                                                     orientation=self.current_orientation,
                                                     frame_name="marker_frame_0",
-                                                    action_name="touch_edge")
+                                                    action_name=self.action_name_str)
                     ]
                     return action_list
                 
@@ -1414,7 +1465,9 @@ class ReasonerNode(ROSNode):
             print("completed an instance of sliding to find edge. Number of points collected: ", len(self.collected_points))
             self.points_on_edge.extend(collected_points_2d)
         
-        elif result.ms_action_name in ["slide_against_edge_until_corner", "slide_against_vertical_surface_until_corner", "slide_against_surface_vector_only"]:
+        elif result.ms_action_name in ["slide_against_edge_until_corner", 
+                                       "slide_against_vertical_surface_until_corner", 
+                                       "slide_against_surface_vector_only"]:
             # reset relevant flags
             self.sliding_against_edge_sm_active = False
             self.get_new_action_list_bool = True
@@ -1494,7 +1547,7 @@ class ReasonerNode(ROSNode):
             self._propagate_knowledge()
             self._sync_knowledge_to_graph()
             
-        edge_idx = self.current_ref_edge_index
+        ## Update dihedrals when moved until edges
         
         if self.current_action_type is None:
             self.get_logger().warn("Previous action instance type is None, since default motion for plane estimation is executed. Skipping checking with action_types for updating RCK.")
@@ -1508,19 +1561,35 @@ class ReasonerNode(ROSNode):
         if self.next_action_idx == self.length_action_list:
             print("Final action in list completed. Updating RCK based on result")
 
-            if (self.current_action_type == ActionType.SLIDE_OVER_SURFACE_UNTIL_EDGE or 
-                self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT or
-                self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CCK or
-                self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CK or
-                self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK or
-                self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK):
+            ref_edge_idx = self.current_ref_edge_index
+            prev_edge_idx = (ref_edge_idx - 1) % self.n_sides
+            next_edge_idx = (ref_edge_idx + 1) % self.n_sides
+            
+            edge_idx_of_interest = ref_edge_idx
+            
+            if (self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_UNTIL_EDGE,
+                                            ActionType.SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT,
+                                            ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CCK,
+                                            ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CK,
+                                            ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK,
+                                            ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK]):
 
                 disjunction_id_for_dihedral_90 = 1
                 disjunction_id_for_dihedral_270 = 2
                 
+                if self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_UNTIL_EDGE,
+                                                ActionType.SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT]:
+                    edge_idx_of_interest = ref_edge_idx
+                elif self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CCK,
+                                                  ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK]:
+                    edge_idx_of_interest = prev_edge_idx
+                elif self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CK,
+                                                  ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK]:
+                    edge_idx_of_interest = next_edge_idx
+                
                 if disjunction_id_for_dihedral_90 in result.disjunction_indices:
-                    self.rck.dihedrals[edge_idx] = 90.0
-                    rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {edge_idx} to 90 degrees based on result of action {self.current_action_type.name}")
+                    self.rck.dihedrals[edge_idx_of_interest] = 90.0
+                    rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {edge_idx_of_interest} to 90 degrees based on result of action {self.current_action_type.name}")
                     # Note: this is approximate point on edge, which will be refined/filtered while sliding along this edge
                     last_desired_velocity = self.desired_velocity
                     norm = math.hypot(last_desired_velocity[0], last_desired_velocity[1])
@@ -1528,20 +1597,20 @@ class ReasonerNode(ROSNode):
 
                     ee_offset_vector = self.diameter_of_end_effector * 0.5 * np.array(last_dir_of_motion)
                     point_on_edge = (self.current_position[0] + ee_offset_vector[0], self.current_position[1] + ee_offset_vector[1])
-                    self.rck.internal_points_on_edge[edge_idx].append(point_on_edge)
-                    rclpy.logging.get_logger("Reasoner").info(f"Updated internal points on edge {edge_idx} with point {point_on_edge} based on result of action {self.current_action_type.name}")
+                    self.rck.internal_points_on_edge[edge_idx_of_interest].append(point_on_edge)
+                    rclpy.logging.get_logger("Reasoner").info(f"Updated internal points on edge {edge_idx_of_interest} with point {point_on_edge} based on result of action {self.current_action_type.name}")
                 elif disjunction_id_for_dihedral_270 in result.disjunction_indices:
-                    self.rck.dihedrals[edge_idx] = 270.0
-                    rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {edge_idx} to 270 degrees based on result of action {self.current_action_type.name}")
+                    self.rck.dihedrals[edge_idx_of_interest] = 270.0
+                    rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {edge_idx_of_interest} to 270 degrees based on result of action {self.current_action_type.name}")
             
             elif (self.current_action_type == ActionType.MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CCK or
                   self.current_action_type == ActionType.MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CK):
                 # point on edge
                 
                 if motion_spec.direction == Direction.CK:
-                    edge_idx_of_interest = (edge_idx + 1) % self.n_sides
+                    edge_idx_of_interest = next_edge_idx
                 elif motion_spec.direction == Direction.CCK:
-                    edge_idx_of_interest = (edge_idx - 1) % self.n_sides
+                    edge_idx_of_interest = prev_edge_idx
                 last_desired_velocity = self.desired_velocity
                 norm = math.hypot(last_desired_velocity[0], last_desired_velocity[1])
                 last_dir_of_motion = (last_desired_velocity[0]/norm, last_desired_velocity[1]/norm) if norm > 0 else (0, 0)
