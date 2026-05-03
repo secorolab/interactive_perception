@@ -750,7 +750,8 @@ def next_action(know: PolygonKnowledge,
                 if (mode == Mode.PARALLEL_IN_FREE_SPACE_FROM_OUTSIDE or
                     mode == Mode.PARALLEL_OVER_SURFACE or
                     mode == Mode.PERPENDICULAR_TO_EDGE_OVER_SURFACE or
-                    mode == Mode.PARALLEL_IN_FREE_SPACE_FROM_OUTSIDE):
+                    mode == Mode.PARALLEL_IN_FREE_SPACE_FROM_OUTSIDE or
+                    mode == Mode.PARALLEL_OVER_SURFACE_FROM_OUTSIDE):
                     stop = Stop.UNTIL_EDGE_CONTACT
                 elif (mode == Mode.AGAINST_EDGE or
                     mode == Mode.AGAINST_VERTICAL):
