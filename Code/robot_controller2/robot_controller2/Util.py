@@ -311,7 +311,10 @@ def resolve_orientation(dir_of_motion, orientation_input: OrientationInput) -> T
     quat = R.from_matrix(rot_matrix).as_quat()
     
     # extract yaw angle from quaternion (rotation around z-axis)
-    yaw = float(R.from_quat(quat).as_euler('zyx')[0])
+    yaw = float(R.from_quat(quat).as_euler('zyx', degrees=True)[0])
+    
+    # since ee is in upside down configuration, yaw angle is flipped, so we take negative of the yaw angle
+    yaw = -yaw
 
     return quat.tolist(), yaw
 
@@ -684,9 +687,9 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
         disjunction 2 (against edge)    : non-reflexive corner
         """
         
-        vel_tolerance = 0.005
-        zero_vel_ul = vel_tolerance
-        zero_vel_ll = -vel_tolerance
+        zero_vel_threshold = 0.001
+        zero_vel_ul = zero_vel_threshold
+        zero_vel_ll = -zero_vel_threshold
         
         # disjunction 1
         current_template = edit_condition(current_template, {
@@ -733,18 +736,18 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
                 "value": [velocity_spike_threshold_vector[0], velocity_spike_threshold_vector[1], None],
                 "operator": velocity_spike_opr_list
             })
+        # current_template = edit_condition(current_template, {
+        #         "condition_type": "POST_CONDITION",
+        #         "disjunction_id": 2,
+        #         "position": 6,
+        #         "type": "POSITION_XYZ",
+        #         "value": [None, None, -0.01],
+        #         "operator": [None, None, lt]
+        #     })
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "disjunction_id": 2,
                 "position": 6,
-                "type": "POSITION_XYZ",
-                "value": [None, None, -0.01],
-                "operator": [None, None, lt]
-            })
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "disjunction_id": 2,
-                "position": 7,
                 "type": "TIME_LIMIT",
                 "value": 2.0,
                 "operator": gt
@@ -757,9 +760,9 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
         disjunction 3 (against vertical surface)  : slide until edge where reflexive corner;
         """
         
-        vel_tolerance = 0.005
-        zero_vel_ul = vel_tolerance
-        zero_vel_ll = -vel_tolerance
+        zero_vel_threshold = 0.001
+        zero_vel_ul = zero_vel_threshold
+        zero_vel_ll = -zero_vel_threshold
         
         # disjunction 1
         current_template = edit_condition(current_template, {
@@ -838,7 +841,13 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
     return str(current_template)
 
 
-def make_action_goal_yaw(position, yaw=0.0, yaw_threshold=0.1, frame_name="eddie_base_link", time_limit=15.0):
+def make_action_goal_yaw(position, yaw=0.0, yaw_threshold=5.0, frame_name="eddie_base_link", time_limit=15.0):
+    """
+    Create a motion specification to attain a specific yaw orientation at a given position.
+    Note: yaw is in degrees
+    """
+    
+    
     current_template = copy.deepcopy(Templates.yaw)
 
     pos_x, pos_y, pos_z = position
