@@ -242,6 +242,9 @@ class GT_VisualizerNode(Node):
         if not ground_truth:
             return
 
+        if len(ground_truth) < 4:
+            return
+
         #Compute fixed transform only once
         if not self.ground_truth_computed:
             all_poses = []
@@ -303,33 +306,38 @@ class GT_VisualizerNode(Node):
             fixed_marker.action = Marker.ADD
             fixed_marker.pose.orientation.w = 1.0
 
-            # Hardcoded object dimensions
-            x_len = 0.6    #0.31  #0.34
-            y_len = 0.34   #0.98  #0.6
+            # # Hardcoded object dimensions
+            # x_len = 0.6    #0.31  #0.34
+            # y_len = 0.34   #0.98  #0.6
+            #
+            # # Define rectangle corners
+            # p0 = Point(x=-x_len / 2, y=-y_len / 2, z=0.0)
+            # p1 = Point(x=x_len / 2, y=-y_len / 2, z=0.0)
+            # p2 = Point(x=x_len / 2, y=y_len / 2, z=0.0)
+            # p3 = Point(x=-x_len / 2, y=y_len / 2, z=0.0)
+            #
+            # poses = [p0, p1, p2, p3]
 
-            # Define rectangle corners
-            p0 = Point(x=-x_len / 2, y=-y_len / 2, z=0.0)
-            p1 = Point(x=x_len / 2, y=-y_len / 2, z=0.0)
-            p2 = Point(x=x_len / 2, y=y_len / 2, z=0.0)
-            p3 = Point(x=-x_len / 2, y=y_len / 2, z=0.0)
+            poses = []
 
-            poses = [p0, p1, p2, p3]
+            for pose in all_poses:
+                poses.append(Point(x=pose[0], y=pose[1], z=pose[2]))
 
             for pose in poses:
                 self.publisher_point.publish(pose)
 
-            # Add rectangle as two triangles
-            fixed_marker.points.extend([p0, p1, p2])
-            fixed_marker.points.extend([p0, p2, p3])
-
-            fixed_marker.scale.x = 1.0
-            fixed_marker.scale.y = 1.0
-            fixed_marker.scale.z = 1.0
-
-            fixed_marker.color.r = 1.0
-            fixed_marker.color.g = 0.0
-            fixed_marker.color.b = 0.5
-            fixed_marker.color.a = 0.4
+            # # Add rectangle as two triangles
+            # fixed_marker.points.extend([p0, p1, p2])
+            # fixed_marker.points.extend([p0, p2, p3])
+            #
+            # fixed_marker.scale.x = 1.0
+            # fixed_marker.scale.y = 1.0
+            # fixed_marker.scale.z = 1.0
+            #
+            # fixed_marker.color.r = 1.0
+            # fixed_marker.color.g = 0.0
+            # fixed_marker.color.b = 0.5
+            # fixed_marker.color.a = 0.4
 
             self.ground_truth_computed = True
 
