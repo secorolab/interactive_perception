@@ -261,6 +261,48 @@ def offset_points(points, edge_uv, distance, side='left'):
 
     return np.asarray(points) + distance * n
 
+def get_quat_of_align_frame_to_edge(plane_orientation, edge_direction_2d) -> List[float]:
+    """
+    Create a new frame orientation where the x-axis aligns with the edge direction,
+    while preserving the z-axis (plane normal) from the plane orientation.
+    
+    :param plane_orientation: Quaternion [x, y, z, w] representing the plane orientation
+    :param edge_direction_2d: Tuple (dx, dy) representing the 2D edge direction (should be normalized)
+    
+    Returns:
+        New quaternion [x, y, z, w] where x-axis aligns with edge_direction_2d
+    """
+    # Extract the z-axis (plane normal) from plane orientation
+    plane_rot = R.from_quat(plane_orientation)
+    plane_matrix = plane_rot.as_matrix()
+    z_axis = plane_matrix[:, 2]  # z column of rotation matrix
+    
+    # Normalize edge direction and extend to 3D (z component = 0)
+    edge_dir_2d = np.asarray(edge_direction_2d, dtype=float)
+    edge_dir_2d = edge_dir_2d / np.linalg.norm(edge_dir_2d)
+    x_axis = np.array([edge_dir_2d[0], edge_dir_2d[1], 0.0])
+    
+    # Compute y-axis as perpendicular to both z and x
+    y_axis = np.cross(z_axis, x_axis)
+    y_norm = np.linalg.norm(y_axis)
+    
+    if y_norm < 1e-6:
+        raise ValueError("Edge direction is parallel to plane normal, cannot create frame")
+    
+    y_axis = y_axis / y_norm
+    
+    # Recompute x_axis to ensure orthogonality
+    x_axis = np.cross(y_axis, z_axis)
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    
+    # Build rotation matrix with new axes
+    rot_matrix = np.column_stack((x_axis, y_axis, z_axis))
+    
+    # Convert to quaternion
+    new_quat = R.from_matrix(rot_matrix).as_quat()
+    
+    return new_quat.tolist()
+
 def resolve_orientation(dir_of_motion, orientation_input: OrientationInput) -> Tuple[List[float], float]:
     """
     Resolve desired orientation based on direction of motion and user input.

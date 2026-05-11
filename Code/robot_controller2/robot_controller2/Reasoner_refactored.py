@@ -366,7 +366,10 @@ class ReasonerNode(ROSNode):
         self.distance_threshold_for_motion_detection = self.config['motion']['distance_threshold_for_motion_detection']
         self.sliding_variables_initialized = False
         self.action_name_str = None
-        
+        self.current_marker_id = -1
+        self.marker_id_for_edges = [None for _ in range(self.n_sides)] # used only for sliding along edge. Thus, even if edge uv is known, this might not be populated until prior to sliding after initial motion along edge.
+        self.plane_origin_position = None
+        self.plane_orientation = None
         self.exploration_complete = False
         self.current_ref_edge_index = None
         self.get_new_action_list_bool = True
@@ -479,12 +482,12 @@ class ReasonerNode(ROSNode):
                 print(f"Distance traversed while sliding: {distance_traversed_2d}")
             else:
                 distance_traversed_2d = 0.0
-        
+            
             # on detection of first sliding motion
             if distance_traversed_2d > self.distance_threshold_for_motion_detection:
                 self.sliding_motion_detected = True
                 self.dir_of_sliding_motion_2d = Util.unit_vector_from_points_2d(self.points_on_edge)
-                self.points_on_edge = [] # reset for next round of accumulation if needed
+
                 angle_with_direction_of_force = Util.get_ccw_angle(self.dir_of_sliding_motion_2d, self.last_direction_of_motion[0:2])
                 if angle_with_direction_of_force < math.pi/2:
                     if self.current_action_spec.mode == Mode.AGAINST_EDGE:
@@ -502,6 +505,19 @@ class ReasonerNode(ROSNode):
                     self.get_logger().warn("Sliding motion detected but direction is ambiguous. There could be a contact loss. Terminating execution")
                     self.stop_execution = True
                     return
+                
+                # get orientation of new marker frame, where x axis is along the direction of sliding motion and z axis is same as base_link frame (assuming planar surface)
+                edge_orientation = Util.get_quat_of_align_frame_to_edge(self.plane_orientation, self.dir_of_sliding_motion_2d)
+                self.create_and_publish_marker_pose(
+                    position=self.points_on_edge[-1], 
+                    orientation=edge_orientation, 
+                    marker_type="marker", 
+                    frame="marker_frame_0")
+                
+                if self.marker_id_for_edges[self.current_ref_edge_index] is None:
+                    self.marker_id_for_edges[self.current_ref_edge_index] = self.current_marker_id
+                
+                self.points_on_edge = [] # reset for next round of accumulation if needed
                 # Note: this is with an assumption that the direction of force is against the edge and contact is always established, which is enabled by previous motion
         
         # continue probing if first sliding is still not detected
@@ -579,65 +595,66 @@ class ReasonerNode(ROSNode):
                 # only when it is vector only, the time parameter in motion spec is used
                 self.action_name_str = "slide_against_surface_vector_only"
 
+            frame_name_with_marker_id = f"marker_frame_{self.marker_id_for_edges[self.current_ref_edge_index]}"
             if self.current_action_spec.mode == Mode.AGAINST_EDGE:                
                 # rotate dir of velocity by 90 degrees to get foce vector for sliding against edge
                 dir_of_force = (-self.dir_of_sliding_motion_2d[1], self.dir_of_sliding_motion_2d[0]) # 90 degree rotation in the frame of base_link
                 
-                if self.current_action_spec.direction == Direction.CCK:    
-                    self.desired_orientation, _ = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.RIGHT_OF_DIR_MOTION)
+                if self.current_action_spec.direction == Direction.CCK:
+                    self.desired_orientation, _ = Util.resolve_orientation(dir_of_motion=[1.0, 0.0], orientation_input=Util.OrientationInput.RIGHT_OF_DIR_MOTION)
                     ms_to_execute = Util.make_action_goal_slide(
                         position=[None, None, -self.offset_below_surface],
-                        velocity=[self.slide_velocity*self.dir_of_sliding_motion_2d[0], self.slide_velocity*self.dir_of_sliding_motion_2d[1], None],
-                        force=[self.force_against_surface * dir_of_force[0], self.force_against_surface * dir_of_force[1], None],
+                        velocity=[self.slide_velocity, None, None],
+                        force=[None, self.force_against_surface, None],
                         orientation=self.desired_orientation,
                         action_name=self.action_name_str,
-                        frame_name="marker_frame_0",
+                        frame_name=frame_name_with_marker_id,
                         time=3.0
                     )
                     self.last_direction_of_motion = [self.dir_of_sliding_motion_2d[0], self.dir_of_sliding_motion_2d[1], 0.0]
                     self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 elif self.current_action_spec.direction == Direction.CK:
-                    self.desired_orientation, _ = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.LEFT_OF_DIR_MOTION)
+                    self.desired_orientation, _ = Util.resolve_orientation(dir_of_motion=[-1.0, 0.0], orientation_input=Util.OrientationInput.LEFT_OF_DIR_MOTION)
                     ms_to_execute = Util.make_action_goal_slide(
                         position=[None, None, -self.offset_below_surface],
-                        velocity=[-self.slide_velocity*self.dir_of_sliding_motion_2d[0], -self.slide_velocity*self.dir_of_sliding_motion_2d[1], None],
-                        force=[-self.force_against_surface * dir_of_force[0], -self.force_against_surface * dir_of_force[1], None],
+                        velocity=[self.slide_velocity, None, None],
+                        force=[None, self.force_against_surface, None],
                         orientation=self.desired_orientation,
                         action_name=self.action_name_str,
-                        frame_name="marker_frame_0",
+                        frame_name=frame_name_with_marker_id,
                         time=3.0
                     )
                     self.last_direction_of_motion = [-self.dir_of_sliding_motion_2d[0], -self.dir_of_sliding_motion_2d[1], 0.0]
-                    self.last_direction_of_force_while_sliding_against_edge = [-dir_of_force[0], -dir_of_force[1], 0.0]
+                    self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 self.send_goal(ms_to_execute)
             
             elif self.current_action_spec.mode == Mode.AGAINST_VERTICAL:
                 dir_of_force = (self.dir_of_sliding_motion_2d[1], -self.dir_of_sliding_motion_2d[0]) # -90 degree rotation in the frame of base_link
                 
-                if self.current_action_spec.direction == Direction.CCK:    
-                    self.desired_orientation, _ = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.LEFT_OF_DIR_MOTION)
+                if self.current_action_spec.direction == Direction.CCK:
+                    self.desired_orientation, _ = Util.resolve_orientation(dir_of_motion=[1.0, 0.0], orientation_input=Util.OrientationInput.LEFT_OF_DIR_MOTION)
                     ms_to_execute = Util.make_action_goal_slide(
-                        velocity=[self.slide_velocity*self.dir_of_sliding_motion_2d[0], self.slide_velocity*self.dir_of_sliding_motion_2d[1], None],
-                        force=[self.force_against_surface * self.dir_of_force[0], self.force_against_surface * self.dir_of_force[1], self.force_against_surface],
+                        velocity=[self.slide_velocity, None, None],
+                        force=[None, -self.force_against_surface, None],
                         orientation=self.desired_orientation,
                         action_name=self.action_name_str,
-                        frame_name="marker_frame_0",
+                        frame_name=frame_name_with_marker_id,
                         time=3.0
                     )
                     self.last_direction_of_motion = [self.dir_of_sliding_motion_2d[0], self.dir_of_sliding_motion_2d[1], 0.0]
                     self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 elif self.current_action_spec.direction == Direction.CK:
-                    self.desired_orientation, _ = Util.resolve_orientation(self.dir_of_sliding_motion_2d, Util.OrientationInput.RIGHT_OF_DIR_MOTION)
+                    self.desired_orientation, _ = Util.resolve_orientation(dir_of_motion=[-1.0, 0.0], orientation_input=Util.OrientationInput.RIGHT_OF_DIR_MOTION)
                     ms_to_execute = Util.make_action_goal_slide(
-                        velocity=[-self.slide_velocity*self.dir_of_sliding_motion_2d[0], -self.slide_velocity*self.dir_of_sliding_motion_2d[1], None],
-                        force=[-self.force_against_surface * self.dir_of_force[0], -self.force_against_surface * self.dir_of_force[1], self.force_against_surface],
+                        velocity=[-self.slide_velocity, None, None],
+                        force=[None, -self.force_against_surface, None],
                         orientation=self.desired_orientation,
                         action_name=self.action_name_str,
-                        frame_name="marker_frame_0",
+                        frame_name=frame_name_with_marker_id,
                         time=3.0
                     )
-                    self.last_direction_of_motion = [-self.dir_of_force[0], -self.dir_of_force[1], 0.0]
-                    self.last_direction_of_force_while_sliding_against_edge = [-dir_of_force[0], -dir_of_force[1], 0.0]
+                    self.last_direction_of_motion = [-self.dir_of_sliding_motion_2d[0], -self.dir_of_sliding_motion_2d[1], 0.0]
+                    self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 self.send_goal(ms_to_execute)
     
     def main_loop(self):
@@ -725,6 +742,7 @@ class ReasonerNode(ROSNode):
                 
                 if self.rpk_rck_matching_idx_found and not self.rck_rearranged:
                     rearrange_rck_using_prior_knowledge(self.rck, self.rpk_first_idx_in_rck)
+                    self.marker_id_for_edges[:] = self.marker_id_for_edges[self.rpk_first_idx_in_rck:] + self.marker_id_for_edges[:self.rpk_first_idx_in_rck] # rearrange marker ids in the same way as rck
                     self.rck_rearranged = True
                     fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
                     self._propagate_knowledge(knowledge="rck")
@@ -1455,9 +1473,10 @@ class ReasonerNode(ROSNode):
                 return
             else:
                 self.plane_slope_estimated = True
-                position, orientation = Util.pose_from_points(points=self.points_on_plane, use_ransac=True)
-                self.get_logger().info(f"Estimated plane pose from points: position={position}, orientation={orientation}")
-                self.create_and_publish_marker_pose(position=position, orientation=orientation, marker_type="marker", frame="eddie_base_link")
+                self.plane_origin_position, self.plane_orientation = Util.pose_from_points(points=self.points_on_plane, use_ransac=True)
+                
+                self.get_logger().info(f"Estimated plane pose from points: position={self.plane_origin_position}, orientation={self.plane_orientation}")
+                self.create_and_publish_marker_pose(position=self.plane_origin_position, orientation=self.plane_orientation, marker_type="marker", frame="eddie_base_link")
                 self.get_logger().info("Plane slope estimation complete, proceeding to next action list generation")
 
         elif result.ms_action_name == "find_edge_by_sliding":
@@ -1485,7 +1504,7 @@ class ReasonerNode(ROSNode):
             
             # make it cck
             angle_with_direction_of_force = Util.get_ccw_angle(self.last_direction_of_motion[0:2], self.last_direction_of_force_while_sliding_against_edge[0:2])
-                    
+            
             if self.current_action_spec.mode == Mode.AGAINST_EDGE:
                 if angle_with_direction_of_force < math.pi:
                     self.get_logger().info("Sliding motion detected in the CCK direction")
@@ -1701,6 +1720,7 @@ class ReasonerNode(ROSNode):
 
 
         if marker_type == "marker":
+            self.current_marker_id += 1
             self.publisher_marker.publish(pose_stamped)
             print("SENDING MARKER")
         elif marker_type == "corner":
