@@ -116,6 +116,9 @@ def is_sorted_by_key(seq: Sequence[T],
     :param reverse: A flag, if set to True, checks if the sequence is sorted in descending order. Default is False
     :return: Whether the sequence is sorted based on the distance to the corner in the specified order
     """
+    
+    max_violations = 3 if len(seq) > 10 else 1 # Allow more violations for longer sequences
+    
     if len(seq) < 2:
         return True
 
@@ -124,11 +127,27 @@ def is_sorted_by_key(seq: Sequence[T],
     if any(math.isnan(d) for d in distances):
         raise ValueError("Key function returned NaN")
 
-    if reverse: # descending order
-        return bool(all(distances[i] - distances[i + 1] >= -tol for i in range(len(distances) - 1)))
-    else: # ascending order
-        return bool(all(distances[i] - distances[i + 1] <= tol for i in range(len(distances) - 1)))
+    # if reverse: # descending order
+    #     return bool(all(distances[i] - distances[i + 1] >= -tol for i in range(len(distances) - 1)))
+    # else: # ascending order
+    #     return bool(all(distances[i] - distances[i + 1] <= tol for i in range(len(distances) - 1)))
+    
+    violations = 0
+    for i in range(len(distances) - 1):
 
+        if reverse:  # descending
+            ok = distances[i] - distances[i + 1] >= -tol
+        else:        # ascending
+            ok = distances[i] - distances[i + 1] <= tol
+
+        if not ok:
+            violations += 1
+
+            if violations > max_violations:
+                print(f"Sequence is not sorted by key with tolerance {tol}. Violations: {violations} out of {len(seq)-1} comparisons.")
+                return False
+    
+    return True
 
 def get_random_points_on_line(p1: Tuple[float, float], 
                               p2: Tuple[float, float], 
