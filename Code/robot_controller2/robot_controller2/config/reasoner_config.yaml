@@ -21,7 +21,7 @@ motion:
   slide_offset_from_edge: 0.1
   force_against_surface: 20.0
   force_along_edge_to_find_slope: 15.0
-  diameter_of_end_effector: 0.06
+  diameter_of_end_effector: 0.08
   distance_threshold_for_motion_detection: 0.02
   angle_increment_radians: 0.174533  # 10 degrees in radians
 

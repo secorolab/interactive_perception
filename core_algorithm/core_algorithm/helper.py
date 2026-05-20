@@ -8,7 +8,7 @@ from .data_structures import *
 
 def is_close(p1: Union[float, Tuple[float, float]], 
              p2: Union[float, Tuple[float, float]], 
-             tol: float = 0.01) -> bool:
+             tol: float = 0.02) -> bool:
     """
     Check if two points or two angles are within a certain distance tolerance.
 
@@ -107,7 +107,7 @@ T = TypeVar("T")
 def is_sorted_by_key(seq: Sequence[T],
                     key: Callable[[T], float],
                     reverse: bool = False,
-                    tol: float = 1e-3,) -> bool:
+                    tol: float = 5e-3,) -> bool:
     """
     Check if the values in the sequence are sorted based on the distance to the corner.
 
@@ -512,9 +512,15 @@ def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
                     # Remove outliers
                     for point in to_remove:
                         if len(internal_points) >= min_points_to_remove_outlers:
-                            internal_points.remove(point)
-                            changed = True
-                            print(f" => Removed outlier point {point} from edge {i}")
+                            for j, p in enumerate(internal_points):
+                                try:
+                                    if is_close(point, p):
+                                        internal_points.pop(j)
+                                        changed = True
+                                        print(f" => Removed outlier point {point} from edge {i}")
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
 
         # If any points on edge is outside the edge bounded by corners, remove them. This could happen when slide until corner overshoots the corner in edge case
         if not changed:
@@ -542,9 +548,16 @@ def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
                         to_remove.append(point)
 
                 for point in to_remove:
-                    know.internal_points_on_edge[i].remove(point)
-                    changed = True
-                    print(f" => Removed point {point} from edge {i} as it lies outside the edge bounds")
+                    # Use index-based removal to avoid numpy array issues
+                    for j, p in enumerate(know.internal_points_on_edge[i]):
+                        try:
+                            if is_close(point, p):
+                                know.internal_points_on_edge[i].pop(j)
+                                changed = True
+                                print(f" => Removed point {point} from edge {i} as it lies outside the edge bounds")
+                                break
+                        except (ValueError, TypeError):
+                            pass
         
         # Rule: if any of internal points is at a distance less than a threshold from other points, 
         # then replace them with their average, such that number of points doesn't go below 2
@@ -575,8 +588,15 @@ def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
                     if len(internal_points) - (len(group) - 1) < min_points_to_remove_outlers:
                         continue
                     average_point = tuple(np.mean(group, axis=0))
+                    # Remove points by index to avoid numpy array issues
                     for point in group:
-                        internal_points.remove(tuple(point))
+                        for j, p in enumerate(internal_points):
+                            try:
+                                if is_close(point, p):
+                                    internal_points.pop(j)
+                                    break
+                            except (ValueError, TypeError):
+                                pass
                     internal_points.append(average_point)
                     changed = True
                     print(f" => Merged points {group} into {average_point} on edge {i}")

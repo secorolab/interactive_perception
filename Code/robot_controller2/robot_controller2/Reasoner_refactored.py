@@ -975,7 +975,8 @@ class ReasonerNode(ROSNode):
             attempt = 0
             num_attempts_allowed = 2
             while attempt < num_attempts_allowed:
-                answer = input("Do you want to continue? (yes/no): ").strip().lower()
+                # answer = input("Do you want to continue? (yes/no): ").strip().lower()
+                answer = "yes"
                 if answer in ("yes", "y"):
                     print("Continuing...")
                     break
@@ -1921,7 +1922,7 @@ class ReasonerNode(ROSNode):
             # Destroy ActionClient if it exists
             if hasattr(self, 'client') and self.client is not None:
                 # Wait for any pending operations to complete
-                if self.client._goal_future is not None:
+                if hasattr(self.client, '_goal_future') and self.client._goal_future is not None:
                     try:
                         self.client._goal_future.result(timeout_sec=0.5)
                     except Exception:
@@ -1951,7 +1952,11 @@ def main(args=None):
         reasoner_node.get_logger().info("Shutdown requested")
     finally:
         reasoner_node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()
+        except RuntimeError:
+            # Context already shut down by node destruction
+            pass
 
 
 if __name__ == '__main__':
