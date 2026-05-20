@@ -1,9 +1,21 @@
 import networkx as nx
+import matplotlib
 import matplotlib.pyplot as plt
 
 global pos
 
 pos = None
+
+# Check if backend is interactive
+def _is_backend_interactive():
+    """Check if matplotlib backend supports interactive mode"""
+    try:
+        backend = matplotlib.get_backend()
+        # Non-interactive backends that don't support show/draw/pause
+        non_interactive = ['Agg', 'agg', 'pdf', 'png', 'svg']
+        return not any(backend.lower().startswith(x.lower()) for x in non_interactive)
+    except:
+        return False
 
 def render_graph_visualization(rck_graph, center_node_id: str = 'polygon_0', k_value: float = 1.0, pause_time: float = 2):
     """
@@ -85,9 +97,14 @@ def render_graph_visualization(rck_graph, center_node_id: str = 'polygon_0', k_v
     # Hide the axes
     plt.axis('off')
 
-    # Redraw
-    plt.draw()
-    plt.pause(pause_time)
+    # Only redraw if backend supports interactive mode
+    if _is_backend_interactive():
+        try:
+            plt.draw()
+            plt.pause(pause_time)
+        except Exception:
+            # Silently handle errors in non-interactive environments
+            pass
 
 
 def create_graph_from_json(data):

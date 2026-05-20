@@ -186,7 +186,7 @@ class PolygonKnowledge:
             
             if len(internal_points) > 1:
                 key_fn = lambda p: np.linalg.norm(np.asarray(p) - corner_arr)
-                internal_points.sort(key=key_fn)
+                internal_points = sorted(internal_points, key=key_fn)
         points.extend(internal_points)
         if self.corners[next_i]:
             points.append(self.corners[next_i])
