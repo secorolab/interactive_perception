@@ -67,7 +67,7 @@ def propagate_parameters(polygon_knowledge: PolygonKnowledge,
     while changed:
         changed = False
 
-        changed = pre_process_polygon_knowledge(polygon_knowledge, min_points_to_remove_outlers, inlier_distance_threshold)
+        changed = bool(pre_process_polygon_knowledge(polygon_knowledge, min_points_to_remove_outlers, inlier_distance_threshold))
 
         # Rule: If atleast two points on an edge is known, and edge-unit-vector is not calculated, calculate it
         if not changed:
@@ -130,9 +130,11 @@ def propagate_parameters(polygon_knowledge: PolygonKnowledge,
                     if p1 is not None and p2 is not None:
                         c = line_intersection(p1, know.slopes[prev_edge_idx], p2, know.slopes[curr_edge_idx])
                         if c is not None:
-                            know.corners[curr_edge_idx] = c
+                            # Convert numpy array to tuple of floats to avoid boolean ambiguity errors later
+                            c_tuple = tuple(float(x) for x in c)
+                            know.corners[curr_edge_idx] = c_tuple
                             changed = True
-                            print(f" => Computed corner {curr_edge_idx} as {c} using slopes and points of edges {prev_edge_idx} and {curr_edge_idx}")
+                            print(f" => Computed corner {curr_edge_idx} as {c_tuple} using slopes and points of edges {prev_edge_idx} and {curr_edge_idx}")
 
         # Rule: If corner angle and one of adjacent slopes are known, compute next slope
         if not changed:
@@ -491,7 +493,7 @@ def next_action(know: PolygonKnowledge,
     # if all edges are known, find any missing dihedrals
     if all_edge_unit_vectors_and_atleast_one_point_on_each_known:
         for i in range(num_sides):
-            if know.dihedrals[i] == None:
+            if know.dihedrals[i] is None:
                 print("All edges are known, sliding to know dihedral angle")
                 return (ActionType.SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT, i)
 
@@ -671,7 +673,7 @@ def next_action(know: PolygonKnowledge,
                     mode = Mode.AGAINST_VERTICAL
                 elif dihedral_angle_of_best_edge_deg == 270:
                     mode = Mode.AGAINST_EDGE
-                elif dihedral_angle_of_best_edge_deg == None:
+                elif dihedral_angle_of_best_edge_deg is None:
                     raise ValueError("Unknown dihedral angle even after edge detection")
                 else:
                     raise NotImplementedError(f"Unhandled dihedral angle {dihedral_angle_of_best_edge_deg}")
@@ -728,7 +730,7 @@ def next_action(know: PolygonKnowledge,
                         elif prev_action_spec.mode == Mode.AGAINST_EDGE:
                             mode = Mode.AGAINST_EDGE
                             ref_edge = best_edge_idx # updating reference edge index from edge of reference
-                    elif dihedral_angle_of_best_edge_deg == 90 or dihedral_angle_of_best_edge_deg == None:
+                    elif dihedral_angle_of_best_edge_deg == 90 or dihedral_angle_of_best_edge_deg is None:
                         mode = Mode.PARALLEL_OVER_SURFACE_FROM_OUTSIDE
                         direction = flip_direction(direction)
                 elif reflexivity_of_corner_of_interest_of_best_edge_idx is False:
@@ -738,7 +740,7 @@ def next_action(know: PolygonKnowledge,
                             ref_edge = best_edge_idx # updating reference edge index from edge of reference
                         elif prev_action_spec.mode == Mode.AGAINST_EDGE:
                             mode = Mode.PARALLEL_OVER_SURFACE
-                    elif dihedral_angle_of_best_edge_deg == None:
+                    elif dihedral_angle_of_best_edge_deg is None:
                         mode = Mode.PARALLEL_OVER_SURFACE
                     elif dihedral_angle_of_best_edge_deg == 270:
                         mode = Mode.PARALLEL_IN_FREE_SPACE_FROM_OUTSIDE
