@@ -8,7 +8,7 @@ from .data_structures import *
 
 def is_close(p1: Union[float, Tuple[float, float]], 
              p2: Union[float, Tuple[float, float]], 
-             tol: float = 0.05) -> bool:
+             tol: float = 0.01) -> bool:
     """
     Check if two points or two angles are within a certain distance tolerance.
 
@@ -31,7 +31,7 @@ def is_close(p1: Union[float, Tuple[float, float]],
 
 def point_in_list(point: Tuple[float, float],
                   point_list: List[Tuple[float, float]],
-                  tol: float = 0.05) -> Tuple[bool, Optional[int]]:
+                  tol: float = 0.01) -> Tuple[bool, Optional[int]]:
     """
     Check whether a point exists in a list of points within a tolerance.
 
@@ -125,9 +125,9 @@ def is_sorted_by_key(seq: Sequence[T],
         raise ValueError("Key function returned NaN")
 
     if reverse: # descending order
-        return all(distances[i] - distances[i + 1] >= -tol for i in range(len(distances) - 1))
+        return bool(all(distances[i] - distances[i + 1] >= -tol for i in range(len(distances) - 1)))
     else: # ascending order
-        return all(distances[i] - distances[i + 1] <= tol for i in range(len(distances) - 1))
+        return bool(all(distances[i] - distances[i + 1] <= tol for i in range(len(distances) - 1)))
 
 
 def get_random_points_on_line(p1: Tuple[float, float], 
@@ -168,7 +168,7 @@ def get_unit_vector(head_point: Tuple[float, float],
         raise ValueError("Cannot compute unit vector from coincident points")
     unit_vector = v/norm
 
-    return unit_vector[0], unit_vector[1]
+    return (float(unit_vector[0]), float(unit_vector[1]))
 
 
 def get_rotated_edge_slope(m: float,
@@ -227,7 +227,7 @@ def get_angle_between_vector(vector_1: np.array,
     if cross_product[2] < 0:
         angle_degrees = -angle_degrees
 
-    return angle_degrees
+    return float(angle_degrees)
 
 
 def best_fit_unit_vector(points: List[Tuple[float, float]]):
@@ -263,7 +263,7 @@ def best_fit_unit_vector(points: List[Tuple[float, float]]):
     if np.dot(unit_vector, ref_direction) < 0:
         unit_vector = -unit_vector
 
-    return unit_vector[0], unit_vector[1]
+    return (float(unit_vector[0]), float(unit_vector[1]))
 
 
 def rotate_vector_2d(v: Tuple[float, float],
@@ -289,7 +289,7 @@ def rotate_vector_2d(v: Tuple[float, float],
         xr /= norm
         yr /= norm
 
-    return xr, yr
+    return (float(xr), float(yr))
 
 
 def are_list_elements_uniform(parameter_list: List,
@@ -320,7 +320,7 @@ def edge_unit_vector_and_atleast_one_point_known(know: PolygonKnowledge,
     :param edge_idx: index of edge
     :return: whether corresponding edge unit vector is known with atleast one point
     """
-    if know.edge_unit_vectors[edge_idx] == None or len(know.get_all_points_on_edge(edge_idx))==0:
+    if know.edge_unit_vectors[edge_idx] is None or len(know.get_all_points_on_edge(edge_idx))==0:
         return False
     return True
 
@@ -422,7 +422,7 @@ def has_unit_vectors_and_points_for_all_edges(know: PolygonKnowledge) -> bool:
 def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
                          min_points_to_remove_outlers: int = 4,
                          inlier_distance_threshold: int = 0.02,
-                         distance_threshold_between_points: float = 0.005) -> None:
+                         distance_threshold_between_points: float = 0.005) -> bool:
     graph_updated = False
     know = polygon_knowledge
     num_sides = know.n_sides
@@ -437,15 +437,28 @@ def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
                 next_idx = (i+1)%num_sides
                 tail_corner = know.corners[i]
                 head_corner = know.corners[next_idx]
+                # Collect points to remove to avoid modifying list while iterating
+                points_to_remove = []
                 for point in know.internal_points_on_edge[i]:
                     if tail_corner is not None and is_close(tail_corner, point):
-                        know.internal_points_on_edge[i].remove(point)
-                        changed = True
+                        points_to_remove.append(point)
                         print(f" => Removed tail corner {tail_corner} of edge {i} from internal_points_on_edge[{i}]")
-                    if head_corner is not None and is_close(head_corner, point):
-                        know.internal_points_on_edge[i].remove(point)
-                        changed = True
+                    elif head_corner is not None and is_close(head_corner, point):
+                        points_to_remove.append(point)
                         print(f" => Removed head corner {head_corner} of edge {i} from internal_points_on_edge[{i}]")
+                
+                # Remove collected points - use index-based removal to avoid numpy array issues
+                for point_to_remove in points_to_remove:
+                    # Find and remove the matching point using is_close for safe comparison
+                    for j, p in enumerate(know.internal_points_on_edge[i]):
+                        try:
+                            if is_close(point_to_remove, p):
+                                know.internal_points_on_edge[i].pop(j)
+                                changed = True
+                                break
+                        except (ValueError, TypeError):
+                            # is_close might fail if point format is unexpected, skip
+                            pass
 
         # If internal points on an edge are not ordered in counterclockwise direction, rearrange them
         # This is currently on the basis of knowledge of a corner. When accumulating the points by sliding, 
