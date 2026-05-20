@@ -14,11 +14,11 @@ knowledge_propagation:
 motion:
   take_user_input_for_orientation: false
   default_orientation: 0  # 0: in direction, 1: against, 2: right, 3: left
-  offset_above_surface: 0.04
-  offset_below_surface: 0.04
+  offset_above_surface: 0.03
+  offset_below_surface: 0.03
   touch_velocity: 0.03
   slide_velocity: 0.05
-  slide_offset_from_edge: 0.05
+  slide_offset_from_edge: 0.1
   force_against_surface: 20.0
   force_along_edge_to_find_slope: 15.0
   diameter_of_end_effector: 0.06
@@ -39,9 +39,9 @@ action_defaults:
   SLIDE_AGAINST_EDGE_CK:
     default_orientation: 3
   SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK:
-    default_orientation: 3
+    default_orientation: 0
   SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK:
-    default_orientation: 2
+    default_orientation: 0
   SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CCK:
     default_orientation: 0
   SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CK:
