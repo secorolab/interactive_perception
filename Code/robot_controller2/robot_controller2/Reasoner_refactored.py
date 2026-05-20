@@ -307,6 +307,10 @@ class ReasonerNode(ROSNode):
         self.stop_execution = False
         self.last_motion_progress_log_time = 0.0
         
+        # ====== Visualization Control ======
+        # Set to False to suppress graph visualization (helps in headless/non-interactive environments)
+        self.enable_graph_visualization = False
+        
         # ====== Knowledge Structures ======
         self.experiment_id = self.config['experiment']['id']
         self.n_sides = self.config['experiment']['n_sides']
@@ -384,6 +388,7 @@ class ReasonerNode(ROSNode):
         self.last_direction_of_motion = None
         self.last_direction_of_force_while_sliding_against_edge = None
         self.collect_points_on_edge_bool = False
+        self.debug_log = False
         
         # Motion tracking
         self.motion_indices_to_collect_points = []
@@ -392,10 +397,20 @@ class ReasonerNode(ROSNode):
         self.points_on_edge = []
         self.current_action_type = None
         
+        # ====== Logging Setup ======
+        self.logs_dir = os.path.join(os.path.dirname(__file__), 'rck_logs')
+        os.makedirs(self.logs_dir, exist_ok=True)
+        self.rck_json_path = os.path.join(self.logs_dir, 'rck_knowledge.json')
+        self.rck_history_dir = os.path.join(self.logs_dir, 'rck_history')
+        os.makedirs(self.rck_history_dir, exist_ok=True)
+        
         # ====== Initialization ======
         
         # Sync rck with graph
         self._sync_knowledge_to_graph()
+        
+        # Save initial rck state
+        self._save_rck_to_json()
         
         # Start main loop
         self.create_timer(0.001, self.main_loop)
@@ -454,8 +469,41 @@ class ReasonerNode(ROSNode):
             self.rck_graph, 
             self.rck
         ) # this updates the values in self.rck_graph.data_structure based on current rck values
-        Graph.render_graph_visualization(self.rck_graph)
+        
+        # Only render visualization if enabled (to avoid issues in headless environments)
+        if self.enable_graph_visualization:
+            Graph.render_graph_visualization(self.rck_graph)
         # since rpk is static, it is not updated here
+    
+    def _save_rck_to_json(self):
+        """
+        Save current knowledge (rck) to JSON file in logs directory.
+        Creates both:
+        1. A main file (rck_knowledge.json) that keeps getting updated
+        2. Timestamped backup files in rck_history directory for tracking evolution
+        """
+        try:
+            # Generate JSON from current rck
+            rck_json = PolygonKnowledgeToGraphConverter.polygon_knw_to_json(
+                self.rck, 
+                frame_name="robot_frame_0",
+                polygon_id="polygon_0"
+            )
+            
+            # Save main file (always updated)
+            with open(self.rck_json_path, 'w') as f:
+                json.dump(rck_json, f, indent=4)
+            
+            # Save timestamped backup for history tracking
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            history_file = os.path.join(self.rck_history_dir, f'rck_knowledge_{timestamp}.json')
+            with open(history_file, 'w') as f:
+                json.dump(rck_json, f, indent=4)
+            
+            self.get_logger().debug(f"Saved rck to {self.rck_json_path}")
+        except Exception as e:
+            self.get_logger().warn(f"Error saving rck to JSON: {e}")
         
     def handle_sliding_against_unknown_surface(self):
         """
@@ -482,7 +530,7 @@ class ReasonerNode(ROSNode):
                 x0, y0 = self.points_on_edge[0][:2]
                 x1, y1 = self.points_on_edge[-1][:2]
                 distance_traversed_2d = math.hypot(x1 - x0, y1 - y0)
-                print(f"Distance traversed while sliding: {distance_traversed_2d}")
+                if self.debug_log: print(f"Distance traversed while sliding: {distance_traversed_2d}")
             else:
                 distance_traversed_2d = 0.0
             
@@ -490,8 +538,11 @@ class ReasonerNode(ROSNode):
             if distance_traversed_2d > self.distance_threshold_for_motion_detection:
                 self.sliding_motion_detected = True
                 self.dir_of_sliding_motion_2d = Util.unit_vector_from_points_2d(self.points_on_edge)
+                if self.debug_log: print(f"Direction of sliding motion (2D): {self.dir_of_sliding_motion_2d}")
 
                 angle_with_direction_of_force = Util.get_ccw_angle(self.dir_of_sliding_motion_2d, self.last_direction_of_motion[0:2])
+                if self.debug_log: print(f"Last direction of motion/force (2D): {self.last_direction_of_motion[0:2]}")
+                if self.debug_log: print(f"Angle between direction of sliding motion and last direction of motion/force: {math.degrees(angle_with_direction_of_force)} degrees")
                 if angle_with_direction_of_force < math.pi/2:
                     if self.current_action_spec.mode == Mode.AGAINST_EDGE:
                         self.get_logger().info("Sliding motion detected in the CCK direction")
@@ -589,7 +640,7 @@ class ReasonerNode(ROSNode):
             self.send_goal(ms_to_execute)
 
         if self.sliding_motion_detected:
-            self.get_logger().info("Sliding motion detected, estimating edge unit vector")
+            self.get_logger().info("Sliding motion detected, determining final sliding motion specification to trace along the edge")
             
             if self.current_action_spec.stop == Stop.UNTIL_CORNER:
                 if self.current_action_spec.mode == Mode.AGAINST_EDGE:
@@ -600,6 +651,8 @@ class ReasonerNode(ROSNode):
                 # only when it is vector only, the time parameter in motion spec is used
                 self.action_name_str = "slide_against_surface_vector_only"
 
+            if self.marker_id_for_edges[self.current_ref_edge_index] is None:
+                self.get_logger().warn(f"Marker ID for edge {self.current_ref_edge_index} is not set.")
             self.current_marker_frame_name = f"marker_frame_{self.marker_id_for_edges[self.current_ref_edge_index]}"
             if self.current_action_spec.mode == Mode.AGAINST_EDGE:                
                 # rotate dir of velocity by 90 degrees to get foce vector for sliding against edge
@@ -669,8 +722,8 @@ class ReasonerNode(ROSNode):
         # exit condition
         if self.dof == 0:
             self.exploration_complete = True
-            self.stop_execution = True
             self.get_logger().info("Exploration complete - all parameters known")
+            rclpy.shutdown()
             return
         
         if self.stop_execution or self.state_of_execution == Util.StateOfExecution.FAILED:
@@ -701,7 +754,6 @@ class ReasonerNode(ROSNode):
             
             if self.sliding_against_edge_sm_active == True:
                 self.sliding_variables_initialized = False
-                self.collect_points_on_edge_bool = False
                 self.handle_sliding_against_unknown_surface()
                 self.get_new_action_list_bool = False
                 return
@@ -751,13 +803,18 @@ class ReasonerNode(ROSNode):
                     self.rck_rearranged = True
                     fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
                     self._propagate_knowledge(knowledge="rck")
+                    self._sync_knowledge_to_graph()
+                    # Save updated rck to logs
+                    self._save_rck_to_json()
                     
                 # find dof after propagation to check if exploration is complete
                 self.dof = find_dof(self.rck)
-                print(f"Degrees of freedom after propagation: {self.dof}")
+                print(f"[main loop] Degrees of freedom after propagation: {self.dof}")
                 
                 # Update visualization
                 self._sync_knowledge_to_graph()
+                # Save updated rck to logs
+                self._save_rck_to_json()
     
     def _propagate_knowledge(self, knowledge: Literal["rck", "rpk"] = "rck",
                              min_points_to_remove_outliers: Optional[int] = None,
@@ -782,14 +839,11 @@ class ReasonerNode(ROSNode):
             self.get_logger().warn(f"Unknown knowledge type {knowledge} for propagation")
             return
         
-        try:
-            propagate_parameters(
-                knowledge_obj,
-                min_points_to_remove_outlers=min_points_to_remove_outliers,
-                inlier_distance_threshold=inlier_distance_threshold
-            )
-        except Exception as e:
-            self.get_logger().warn(f"Error during knowledge propagation: {e}")
+        propagate_parameters(
+            knowledge_obj,
+            min_points_to_remove_outlers=min_points_to_remove_outliers,
+            inlier_distance_threshold=inlier_distance_threshold
+        )
             
     def _validate_edge_uv_and_normalize(self, edge_uv):
         if edge_uv is None:
@@ -871,6 +925,22 @@ class ReasonerNode(ROSNode):
             self.current_action_type, self.current_ref_edge_index = next_action(self.rck, self.prev_action_instance, self.rck_rearranged)
             self.current_action_spec = ACTION_TO_SPEC[self.current_action_type] if self.current_action_type is not None else None
 
+            # if next_action is None, check if knowledge is complete
+            if self.current_action_type is None:
+                self.get_logger().info("No action recommendation from action selection algorithm. Checking if knowledge is complete.")
+                self._propagate_knowledge(knowledge="rck") # propagate knowledge before checking dof to fill in any values that can be resolved based on current knowledge
+                self._sync_knowledge_to_graph()
+                # Save updated rck to logs
+                self._save_rck_to_json()
+                self.dof = find_dof(self.rck)
+                print(f"Degrees of freedom: {self.dof}")
+                if self.dof == 0:
+                    self.exploration_complete = True
+                    self.get_logger().info("Exploration complete - all parameters known")
+                    rclpy.shutdown()
+                else:
+                    self.get_logger().warn("Knowledge is not complete but no action recommendation found. There might be an issue with action selection algorithm or the way knowledge is represented.")
+                return
             self.get_logger().info(
                 f"Next action: {self.current_action_type.name} with reference edge being: {self.current_ref_edge_index}"
             )
@@ -940,16 +1010,9 @@ class ReasonerNode(ROSNode):
                     self.stop_execution = True
                     return
                 
-                if self.current_marker_frame_name == "marker_frame_0":
-                    min_dist_idx = min(range(len(points_on_edge)),
-                                        key=lambda i: (self.current_position[0] - points_on_edge[i][0])**2 +
-                                                    (self.current_position[1] - points_on_edge[i][1])**2)
-                else: # get mid point
-                    if len(points_on_edge) == 1:
-                        min_dist_idx = 0
-                    else:
-                        min_dist_idx = len(points_on_edge) // 2
-                
+                min_dist_idx = min(range(len(points_on_edge)),
+                                    key=lambda i: (self.current_position[0] - points_on_edge[i][0])**2 +
+                                                (self.current_position[1] - points_on_edge[i][1])**2)
                 point_of_interest_on_edge = points_on_edge[min_dist_idx]
                 
                 # find a point perpendicular to edge, but on the plane using edge_unit_vector
@@ -966,18 +1029,20 @@ class ReasonerNode(ROSNode):
                 self.action_name_str = "slide_until_edge"
                 self.last_direction_of_motion = [opp_to_perp_direction[0], opp_to_perp_direction[1], 0.0]
                 action_list = [
-                        # move above point on plane by offset_above_surface
                         Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                    orientation = self.current_orientation, 
-                                                   frame_name=self.current_marker_frame_name),
-                        Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
-                                                   orientation = self.current_orientation, 
                                                    frame_name="marker_frame_0"),
-                        
+
                         # attain desired yaw
                         Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                   yaw = desired_yaw,
                                                   frame_name="marker_frame_0"),
+
+                        # move above point on plane by offset_above_surface
+                        Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
+                                                   orientation = self.desired_orientation, 
+                                                   frame_name="marker_frame_0"),
+                        
                         
                         # touch table
                         Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
@@ -1015,7 +1080,7 @@ class ReasonerNode(ROSNode):
                         # attain desired yaw
                         Util.make_action_goal_yaw(position=desired_pos_while_setting_yaw, 
                                                   yaw = desired_yaw,
-                                                  frame_name=self.current_marker_frame_name),
+                                                  frame_name="marker_frame_0"),
                         
                         # touch table
                         Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
@@ -1041,37 +1106,40 @@ class ReasonerNode(ROSNode):
                 edge_uv = self.rck.edge_unit_vectors[self.current_ref_edge_index]
                 edge_uv = self._validate_edge_uv_and_normalize(edge_uv)
                 perp_direction = (-edge_uv[1], edge_uv[0]) # (-uy, ux) when rotated by 90 degrees in anticlockwise direction, but since edge unit vector is anticlockwise
+                opp_direction = (-edge_uv[0], -edge_uv[1])
                 
                 points_on_edge = self.rck.internal_points_on_edge[self.current_ref_edge_index]
                 # print points on edge for debugging
-                print(f"Points on edge {self.current_ref_edge_index}: {points_on_edge}")
+                if self.debug_log: print(f"Points on edge {self.current_ref_edge_index}: {points_on_edge}")
                 
                 if len(points_on_edge) == 0:
                     self.get_logger().warn(f"No points on edge {self.current_ref_edge_index} to determine point for sliding parallel to edge. Stopping execution.")
                     self.stop_execution = True
                     return
                 point_on_edge = points_on_edge[-1]
-                print(f"Selected point on edge for sliding parallel to edge: {point_on_edge}")
-                print(f"Perpendicular direction to edge for sliding parallel to edge: {perp_direction}")
-                point_on_plane = (point_on_edge[0] + perp_direction[0]*self.slide_offset_from_edge, point_on_edge[1] + perp_direction[1]*self.slide_offset_from_edge)
-                
+                if self.debug_log: print(f"Selected point on edge for sliding parallel to edge: {point_on_edge}")
+                point_on_plane = (point_on_edge[0] + perp_direction[0]*self.slide_offset_from_edge + opp_direction[0]*self.slide_offset_from_edge, 
+                                  point_on_edge[1] + perp_direction[1]*self.slide_offset_from_edge + opp_direction[1]*self.slide_offset_from_edge)
+                if self.debug_log: print("offset point on plane for sliding parallel to edge: ", point_on_plane)
                 self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=edge_uv, orientation_input=self.orientation_input)
                 self.desired_velocity = [self.slide_velocity*edge_uv[0], self.slide_velocity*edge_uv[1], None]
                 
                 self.last_direction_of_motion = [edge_uv[0], edge_uv[1], 0.0]
                 self.action_name_str = "slide_until_edge"
                 action_list = [
-                    # move to a point offset from edge to slide parallel to edge
+                    # move above the surface
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 orientation = self.current_orientation, 
-                                                frame_name=self.current_marker_frame_name),
-                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
-                                                orientation = self.current_orientation,
                                                 frame_name="marker_frame_0"),
                     
                     # attain desired yaw
                     Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 yaw = desired_yaw,
+                                                frame_name="marker_frame_0"),
+                    
+                    # move to point on plane offset from edge to slide parallel to edge
+                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
+                                                orientation = self.desired_orientation,
                                                 frame_name="marker_frame_0"),
                     
                     # touch table
@@ -1101,24 +1169,26 @@ class ReasonerNode(ROSNode):
                     self.stop_execution = True
                     return
                 point_on_edge = points_on_edge[0]
-                point_on_plane = (point_on_edge[0] + perp_direction[0]*self.slide_offset_from_edge, point_on_edge[1] + perp_direction[1]*self.slide_offset_from_edge)
-                
+                point_on_plane = (point_on_edge[0] + perp_direction[0]*self.slide_offset_from_edge + edge_uv[0]*self.slide_offset_from_edge, 
+                                  point_on_edge[1] + perp_direction[1]*self.slide_offset_from_edge + edge_uv[1]*self.slide_offset_from_edge)
+
                 self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=edge_uv_ck, orientation_input=self.orientation_input)
                 self.desired_velocity = [self.slide_velocity*edge_uv_ck[0], self.slide_velocity*edge_uv_ck[1], None]
                 
                 self.last_direction_of_motion = [edge_uv_ck[0], edge_uv_ck[1], 0.0]
                 self.action_name_str = "slide_until_edge"
                 action_list = [
-                    # move to a point offset from edge to slide parallel to edge
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 orientation = self.current_orientation, 
-                                                frame_name=self.current_marker_frame_name),
-                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
-                                                orientation = self.current_orientation,
                                                 frame_name="marker_frame_0"),
                     # attain desired yaw
                     Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 yaw = desired_yaw,
+                                                frame_name="marker_frame_0"),
+                    
+                    # move to a point offset from edge to slide parallel to edge
+                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
+                                                orientation = self.desired_orientation,
                                                 frame_name="marker_frame_0"),
                     # touch table
                     Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
@@ -1165,7 +1235,8 @@ class ReasonerNode(ROSNode):
                 else:
                     point_on_edge = corner_coordinate
                 
-                point_on_plane = (point_on_edge[0] + perp_direction[0]*self.slide_offset_from_edge, point_on_edge[1] + perp_direction[1]*self.slide_offset_from_edge)
+                point_on_plane = (point_on_edge[0] + perp_direction[0]*self.slide_offset_from_edge, 
+                                  point_on_edge[1] + perp_direction[1]*self.slide_offset_from_edge)
                 
                 point_closest_to_start_of_edge = (point_on_plane[0] + edge_uv_ck[0]*0.15, point_on_plane[1] + edge_uv_ck[1]*0.15) # point on plane further away from edge in direction of edge unit vector
                 point_to_traverse_in_opp_direction = (point_closest_to_start_of_edge[0] + opp_to_perp_direction[0]*0.15, point_closest_to_start_of_edge[1] + opp_to_perp_direction[1]*0.15) # point on plane with offset to best_edge
@@ -1180,23 +1251,23 @@ class ReasonerNode(ROSNode):
                     ## case 1: prev: slide until corner and reflexive and dihedral is 90/unknown
                     ## case 2: prev: slide against vertical until corner, and dihedral is 270
                     ## case 3: when a corner of best edge is known, and arm is not at adjacent edge
-                    # move to a point offset from edge to slide parallel to edge
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 orientation = self.current_orientation, 
-                                                frame_name=self.current_marker_frame_name),
-                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
-                                                orientation = self.current_orientation,
                                                 frame_name="marker_frame_0"),
-                    Util.make_action_goal_move(position=[point_closest_to_start_of_edge[0], point_closest_to_start_of_edge[1], self.offset_above_surface], 
-                                                orientation = self.current_orientation,
-                                                frame_name="marker_frame_0"),
-                    Util.make_action_goal_move(position=[point_to_traverse_in_opp_direction[0], point_to_traverse_in_opp_direction[1], self.offset_above_surface], 
-                                                orientation = self.current_orientation,
-                                                frame_name="marker_frame_0"),
-                    
                     # attain desired yaw
                     Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
-                                                yaw = desired_yaw,
+                                            yaw = desired_yaw,
+                                            frame_name="marker_frame_0"),
+                    
+                    # move to a point offset from edge to slide parallel to edge
+                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
+                                                orientation = self.desired_orientation,
+                                                frame_name="marker_frame_0"),
+                    Util.make_action_goal_move(position=[point_closest_to_start_of_edge[0], point_closest_to_start_of_edge[1], self.offset_above_surface], 
+                                                orientation = self.desired_orientation,
+                                                frame_name="marker_frame_0"),
+                    Util.make_action_goal_move(position=[point_to_traverse_in_opp_direction[0], point_to_traverse_in_opp_direction[1], self.offset_above_surface], 
+                                                orientation = self.desired_orientation,
                                                 frame_name="marker_frame_0"),
                     
                     # touch table
@@ -1263,24 +1334,26 @@ class ReasonerNode(ROSNode):
                     ## case 1: prev: slide until corner and reflexive and dihedral is 90/unknown
                     ## case 2: prev: slide against vertical until corner, and dihedral is 270
                     ## case 3: when a corner of best edge is known, and arm is not at adjacent edge
-                    # move to a point offset from edge to slide parallel to edge
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 orientation = self.current_orientation, 
-                                                frame_name=self.current_marker_frame_name),
-                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
-                                                orientation = self.current_orientation,
-                                                frame_name="marker_frame_0"),
-                    Util.make_action_goal_move(position=[point_further_away_in_dir_of_edge[0], point_further_away_in_dir_of_edge[1], self.offset_above_surface], 
-                                                orientation = self.current_orientation,
-                                                frame_name="marker_frame_0"),
-                    Util.make_action_goal_move(position=[point_to_traverse_in_opp_direction[0], point_to_traverse_in_opp_direction[1], self.offset_above_surface], 
-                                                orientation = self.current_orientation,
                                                 frame_name="marker_frame_0"),
                     
                     # attain desired yaw
                     Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 yaw = desired_yaw,
                                                 frame_name="marker_frame_0"),
+
+                    # move to a point offset from edge to slide parallel to edge
+                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
+                                                orientation = self.desired_orientation,
+                                                frame_name="marker_frame_0"),
+                    Util.make_action_goal_move(position=[point_further_away_in_dir_of_edge[0], point_further_away_in_dir_of_edge[1], self.offset_above_surface], 
+                                                orientation = self.desired_orientation,
+                                                frame_name="marker_frame_0"),
+                    Util.make_action_goal_move(position=[point_to_traverse_in_opp_direction[0], point_to_traverse_in_opp_direction[1], self.offset_above_surface], 
+                                                orientation = self.desired_orientation,
+                                                frame_name="marker_frame_0"),
+                    
                     
                     # touch table
                     Util.make_action_goal_touch(velocity=[0, 0, -self.touch_velocity], 
@@ -1309,9 +1382,9 @@ class ReasonerNode(ROSNode):
                     return
                 
                 if self.prev_action_spec.stop == Stop.UNTIL_CORNER:
-                    ck_motion = False
+                    cw_motion = False
                     if self.current_action_type == ActionType.MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CK:
-                        ck_motion = True
+                        cw_motion = True
                     # case 1: if prev action was move until corner and corner angle is non-reflexive and dihedral is 270: dir matters, ref-edge is adjacent edge
                     edge_uv = self.rck.edge_unit_vectors[self.current_ref_edge_index]
                     edge_uv = self._validate_edge_uv_and_normalize(edge_uv)
@@ -1322,7 +1395,7 @@ class ReasonerNode(ROSNode):
                         self.get_logger().warn(f"No points on edge {self.current_ref_edge_index} to determine point for moving parallel to edge until contact. Stopping execution.")
                         self.stop_execution = True
                         return
-                    if ck_motion:
+                    if cw_motion:
                         point_on_edge = points_on_edge[-1]
                         desired_direction_of_motion = edge_uv_ck
                     else:
@@ -1355,27 +1428,27 @@ class ReasonerNode(ROSNode):
                         # replace None with 0.0
                         prev_desired_velocity = [v if v is not None else 0.0 for v in prev_desired_velocity]
                         norm_of_prev_desired_velocity = np.linalg.norm(prev_desired_velocity)
-                        prev_dir_of_motion = (prev_desired_velocity[0]/norm_of_prev_desired_velocity, prev_desired_velocity[1]/norm_of_prev_desired_velocity)
-                        opp_to_prev_dir_of_motion = (-prev_dir_of_motion[0], -prev_dir_of_motion[1])
+                        # prev_dir_of_motion = (prev_desired_velocity[0]/norm_of_prev_desired_velocity, prev_desired_velocity[1]/norm_of_prev_desired_velocity)
+                        # opp_to_prev_dir_of_motion = (-prev_dir_of_motion[0], -prev_dir_of_motion[1])
+                        opp_to_prev_dir_of_motion = (-prev_desired_velocity[0]/norm_of_prev_desired_velocity, -prev_desired_velocity[1]/norm_of_prev_desired_velocity)
                         desired_dir_of_vel = opp_to_prev_dir_of_motion
-                        self.get_logger().warn(f"Edge unit vector for edge {self.current_ref_edge_index} is None. Cannot determine edge direction for moving parallel to edge until contact. Using opposite to previous desired velocity direction {opp_to_prev_dir_of_motion} for determining point on the edge.")
+                        self.get_logger().warn(f"Edge unit vector for edge {self.current_ref_edge_index} is None. \
+                                               Cannot determine edge direction for moving parallel to edge until contact. \
+                                               Using opposite to previous desired velocity direction {opp_to_prev_dir_of_motion} \
+                                               for determining point on the edge.")
                     else:
                         edge_uv = self._validate_edge_uv_and_normalize(edge_uv)
+                        """
                         perp_direction = (-edge_uv[1], edge_uv[0]) # (-uy, ux) when rotated by 90 degrees in anticlockwise direction, but since edge unit vector is anticlockwise
                         opp_to_perp_direction = (edge_uv[1], -edge_uv[0])
                         desired_dir_of_vel = opp_to_perp_direction
+                        """
+                        opp_to_edge_uv = (-edge_uv[0], -edge_uv[1])
+                        desired_dir_of_vel = opp_to_edge_uv
                     
                     # offset current position opposite to the desired_dir_of_vel to get reliable free space
                     offset_distance = 0.02 # 2cm
                     
-                    if self.current_marker_frame_name != "marker_frame_0":
-                        self.current_position = Util.transform_points_to_plane_frame(
-                            points=[self.current_position],
-                            target_frame_position=self.plane_origin_position,
-                            target_frame_orientation=self.plane_orientation,
-                            source_frame_position=self.current_edge_of_interest_origin,
-                            source_frame_orientation=self.current_edge_of_interest_orientation                            
-                        )
                     offset_position = (self.current_position[0] - desired_dir_of_vel[0]*offset_distance, self.current_position[1] - desired_dir_of_vel[1]*offset_distance)
                     
                     self.desired_velocity = [self.touch_velocity*desired_dir_of_vel[0], self.touch_velocity*desired_dir_of_vel[1], 0.0]
@@ -1517,7 +1590,10 @@ class ReasonerNode(ROSNode):
                 self.plane_origin_position, self.plane_orientation = Util.pose_from_points(points=self.points_on_plane, use_ransac=True)
                 
                 self.get_logger().info(f"Estimated plane pose from points: position={self.plane_origin_position}, orientation={self.plane_orientation}")
-                self.create_and_publish_marker_pose(position=self.plane_origin_position, orientation=self.plane_orientation, marker_type="marker", frame="eddie_base_link")
+                self.create_and_publish_marker_pose(position=self.plane_origin_position, 
+                                                    orientation=self.plane_orientation, 
+                                                    marker_type="marker", 
+                                                    frame="eddie_base_link")
                 self.get_logger().info("Plane slope estimation complete, proceeding to next action list generation")
 
         elif result.ms_action_name == "find_edge_by_sliding":
@@ -1530,6 +1606,7 @@ class ReasonerNode(ROSNode):
                                        "slide_against_surface_vector_only"]:
             # reset relevant flags
             self.sliding_against_edge_sm_active = False
+            self.collect_points_on_edge_bool = False
             self.get_new_action_list_bool = True
             self.next_action_idx = 0
             
@@ -1539,19 +1616,14 @@ class ReasonerNode(ROSNode):
             
             # get direction from collected points
             collected_points_2d = [(p[0], p[1]) for p in self.collected_points]
+            e_uv_before_resampling = Util.unit_vector_from_points_2d(collected_points_2d)
+            if self.debug_log: print("edge uv before resampling: ", e_uv_before_resampling)
+            if self.debug_log: print("collected points 2d: ", collected_points_2d)
             internal_points_2d = Util.resample_line_points(collected_points_2d)
+            if self.debug_log: print("collected points 2d after resampling: ", internal_points_2d)
             radius_of_ee = self.diameter_of_end_effector * 0.5
             
-            print("poionts before transforming to plane frame: ", internal_points_2d)
-            # transform points to marker_frame_0 (frame associated with plane)
-            internal_points_in_plane_frame_2d = Util.transform_points_to_plane_frame(points=internal_points_2d, 
-                                                                                    target_frame_position=self.plane_origin_position, 
-                                                                                    target_frame_orientation=self.plane_orientation,
-                                                                                    source_frame_position=self.current_edge_of_interest_origin,
-                                                                                    source_frame_orientation=self.current_edge_of_interest_orientation
-                                                                                    )
-            print("points after transforming to plane frame: ", internal_points_in_plane_frame_2d)
-            edge_uv = Util.unit_vector_from_points_2d(internal_points_in_plane_frame_2d)
+            edge_uv = Util.unit_vector_from_points_2d(internal_points_2d)
             print("edge uv from points: ", edge_uv)
             
             # make it cck
@@ -1564,17 +1636,18 @@ class ReasonerNode(ROSNode):
                 elif angle_with_direction_of_force > math.pi:
                     self.get_logger().info("Sliding motion detected in the CK direction. Flipping direction to get correct edge unit vector")
                     edge_uv = [-edge_uv[0], -edge_uv[1]] # invert direction to match CCK direction
-                internal_points_in_plane_frame_2d = Util.offset_points(internal_points_in_plane_frame_2d, edge_uv, radius_of_ee, side='left')
+                internal_points_2d = Util.offset_points(internal_points_2d, edge_uv, radius_of_ee, side='left')
             elif self.current_action_spec.mode == Mode.AGAINST_VERTICAL:
                 if angle_with_direction_of_force < math.pi:
                     self.get_logger().info("Sliding motion detected in the CK direction. Flipping direction to get correct edge unit vector")
                     edge_uv = [-edge_uv[0], -edge_uv[1]] # invert direction to match CCK direction
                 elif angle_with_direction_of_force > math.pi:
                     self.get_logger().info("Sliding motion detected in the CCK direction")
-                internal_points_in_plane_frame_2d = Util.offset_points(internal_points_in_plane_frame_2d, edge_uv, radius_of_ee, side='right')
+                internal_points_2d = Util.offset_points(internal_points_2d, edge_uv, radius_of_ee, side='right')
             # update internal points by taking offset into account and edge unit vector for the current reference edge based on sliding motion
-            self.rck.internal_points_on_edge[self.current_ref_edge_index] = internal_points_in_plane_frame_2d
+            self.rck.internal_points_on_edge[self.current_ref_edge_index] = [tuple(pt) if isinstance(pt, (list, tuple)) else pt for pt in internal_points_2d]
             self.rck.edge_unit_vectors[self.current_ref_edge_index] = (edge_uv[0], edge_uv[1])
+            rclpy.logging.get_logger("Reasoner").info(f"Updated internal points and edge unit vector. Edge unit vector for edge {self.current_ref_edge_index} is now {self.rck.edge_unit_vectors[self.current_ref_edge_index]}")
 
             # based on disjunction ids, update dihedral angle and reflexivity of corner angle            
             disjunction_id_for_dih_90_non_reflexive = 1     # while sliding against vertical surface
@@ -1614,9 +1687,42 @@ class ReasonerNode(ROSNode):
                         self.rck.is_reflexive_angle[edge_idx_of_interest_reflexivity] = False
                         rclpy.logging.get_logger("Reasoner").info(f"Updated angle type of edge {edge_idx_of_interest_reflexivity} to non-reflexive based on result of action {self.current_action_type.name}")
             
-            # update knowledge and graph
-            self._propagate_knowledge()
+            # propagate current knowledge
+            self._propagate_knowledge(knowledge="rck")
+
+            # check if unique pattern is found for action selection
+            self.unique_pattern_found_in_rck = find_unique_pattern(self.rck)
+
+            if self.unique_pattern_found_in_rpk and self.unique_pattern_found_in_rck and not self.rpk_rck_matching_idx_found:
+                self.get_logger().info(f"Unique_pattern_found_in_rpk: {self.unique_pattern_found_in_rpk}, unique_pattern_found_in_rck: {self.unique_pattern_found_in_rck}")
+                self.get_logger().info("Attempting to match rck with rpk...")
+                self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(self.rck, self.rpk)
+            if not self.rpk_rck_matching_idx_found:
+                if self.corner_coordinates_available_in_rpk:
+                    print("Attempting to match rck with rpk using corner coordinates...")
+                    self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(self.rck, self.rpk, match_corner_coordinates=True)
+                else:
+                    print("Attempting to find unique pattern in individual parameters...")
+                    self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(self.rck, self.rpk, find_match_in_individual_parameters=True)
+            
+            if self.rpk_rck_matching_idx_found and not self.rck_rearranged:
+                rearrange_rck_using_prior_knowledge(self.rck, self.rpk_first_idx_in_rck)
+                self.marker_id_for_edges[:] = self.marker_id_for_edges[self.rpk_first_idx_in_rck:] + self.marker_id_for_edges[:self.rpk_first_idx_in_rck] # rearrange marker ids in the same way as rck
+                self.rck_rearranged = True
+                fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
+                self._propagate_knowledge(knowledge="rck")
+                self._sync_knowledge_to_graph()
+                # Save updated rck to logs
+                self._save_rck_to_json()
+                
+            # find dof after propagation to check if exploration is complete
+            self.dof = find_dof(self.rck)
+            print(f"[on action success]Degrees of freedom after propagation: {self.dof}")
+            
+            # Update visualization
             self._sync_knowledge_to_graph()
+            # Save updated rck to logs
+            self._save_rck_to_json()
             
         ## Update dihedrals when moved until edges
         
@@ -1697,6 +1803,8 @@ class ReasonerNode(ROSNode):
             # propagate knowledge based on new observations
             self._propagate_knowledge()
             self._sync_knowledge_to_graph()
+            # Save updated rck to logs
+            self._save_rck_to_json()
             self.motion_indices_to_collect_points = []
                     
         # Clear collected points after each motion specification execution
@@ -1712,26 +1820,44 @@ class ReasonerNode(ROSNode):
         
         self.first_state_update_received = True
         
+        ee_pose_frame_id = msg.header.frame_id        
+        self.current_position = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
+        self.current_orientation = [msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w]
+
+        # transform point from edge frame to plane frame if necessary
+        if (ee_pose_frame_id.startswith("marker_frame") and 
+            self.plane_slope_estimated):
+            if ee_pose_frame_id != "marker_frame_0":
+                if self.debug_log: print(f"Transforming current pose from frame {ee_pose_frame_id} to global frame using plane origin and orientation")
+                if self.debug_log: print(f"Current position before transformation: {self.current_position}, Current orientation before transformation: {self.current_orientation}")
+                if self.debug_log: print(f"Current edge of interest origin: {self.current_edge_of_interest_origin}, Current edge of interest orientation: {self.current_edge_of_interest_orientation}")
+                self.current_position = Util.transform_points_local_to_global(
+                                        points=[self.current_position],
+                                        frame_position_wrt_global=self.current_edge_of_interest_origin,
+                                        frame_orientation_wrt_global=self.current_edge_of_interest_orientation
+                                        )[0]
+                self.current_orientation = Util.transform_quaternion_local_to_global(
+                    quaternion_local=self.current_orientation,
+                    frame_orientation_wrt_global=self.current_edge_of_interest_orientation
+                )
+                
+            else:
+                if self.debug_log: print(f"The current pose is not transformed. Collected point is in frame {ee_pose_frame_id} ")
+        else:
+            if self.debug_log: print(f"The current pose is not transformed. Either plane slope is not estimated yet or current marker frame {ee_pose_frame_id} does not start with 'marker_frame' ")
+        
         current_motion_idx = self.next_action_idx - 1
         if (current_motion_idx in self.motion_indices_to_collect_points or
             self.collect_points_on_edge_bool):
-            position = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
-            self.collected_points.append(position)
+            if self.collect_points_on_edge_bool:
+                if self.debug_log: print(f"Collecting point {self.current_position}")
+            self.collected_points.append(self.current_position)
 
-        self.current_position = [
-            msg.pose.position.x,
-            msg.pose.position.y,
-            msg.pose.position.z
-        ]
-        
-        self.current_orientation = [
-            msg.pose.orientation.x,
-            msg.pose.orientation.y,
-            msg.pose.orientation.z,
-            msg.pose.orientation.w
-        ]
-
-    def create_and_publish_marker_pose(self, marker_type="marker", frame=None, position=None, orientation=None):
+    def create_and_publish_marker_pose(self, 
+                                       marker_type="marker", 
+                                       frame=None, 
+                                       position=None, 
+                                       orientation=None):
 
         pose_stamped = PoseStamped()
 
@@ -1785,6 +1911,27 @@ class ReasonerNode(ROSNode):
             self.publisher_plane.publish(pose_stamped)
             print("SENDING PLANE")
         return
+
+    def destroy_node(self):
+        """
+        Properly clean up ROS 2 resources including ActionClient and subscriptions.
+        This prevents the "Maximum number of clients reached" error for graph visualization.
+        """
+        try:
+            # Destroy ActionClient if it exists
+            if hasattr(self, 'client') and self.client is not None:
+                # Wait for any pending operations to complete
+                if self.client._goal_future is not None:
+                    try:
+                        self.client._goal_future.result(timeout_sec=0.5)
+                    except Exception:
+                        pass
+                self.client = None
+        except Exception as e:
+            self.get_logger().warn(f"Error destroying ActionClient: {e}")
+        
+        # Call parent's destroy_node to clean up other ROS resources
+        super().destroy_node()
 
 
 def main(args=None):
