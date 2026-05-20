@@ -59,6 +59,11 @@ def resample_line_points(points, spacing=0.01):
 
     direction = eigvecs[:, np.argmax(eigvals)]
     direction /= np.linalg.norm(direction)
+    
+    initial_direction = pts[-1] - pts[0]
+
+    if np.dot(direction, initial_direction) < 0:
+        direction = -direction
 
     t = centered @ direction
     t_sorted = np.sort(t)
@@ -100,54 +105,70 @@ def unit_vector_from_points_2d(points):
 
     # normalize
     direction /= np.linalg.norm(direction)
-    return direction[0:2]
     
-    
-import numpy as np
-from scipy.spatial.transform import Rotation as R
+    # orient according to first -> last point
+    initial_direction = pts[-1] - pts[0]
 
-def transform_points_to_plane_frame(points, target_frame_position, target_frame_orientation,
-                                     source_frame_position, source_frame_orientation):
-    """
-    Transform points from source frame to target frame, given their positions and orientations.
+    if np.dot(direction, initial_direction) < 0:
+        direction = -direction
     
-    :param points: list of (x, y) tuples in source frame (can be 2D or 3D; if 2D, z=0 is assumed)
-    :param target_frame_position: (x, y) or (x, y, z) position of target frame in world coordinates
-    :param target_frame_orientation: (x, y, z, w) quaternion of target frame in world coordinates
-    :param source_frame_position: (x, y) or (x, y, z) position of source frame in world coordinates
-    :param source_frame_orientation: (x, y, z, w) quaternion of source frame in world coordinates
-    
-    :return: list of (x, y) tuples representing points in target frame coordinates    
+    return direction[0:2]
+
+def transform_points_local_to_global(points,
+                                    frame_position_wrt_global,
+                                    frame_orientation_wrt_global):
     """
+    Transform points from local frame to global frame.
+
+    :param points: (N,2) or (N,3)
+        Points expressed in local frame.
+
+    :param frame_position_wrt_global: (3,)
+        Local frame origin expressed in global frame.
+
+    :param frame_orientation_wrt_global: (4,)
+        Quaternion (x,y,z,w) representing local-frame orientation in global frame.
+
+    :return: (N, 3) numpy array of (x, y, z) tuples representing points in global frame coordinates
+    """
+
     # check if any point is 2D (i.e. z=0), if so, convert to 3D by adding z=0 coordinate
     if len(points) > 0 and len(points[0]) == 2:
         points = [(p[0], p[1], 0.0) for p in points]
     elif len(points) == 0:
         raise ValueError("No points to transform")
 
-    if len(target_frame_position) == 2:
-        target_frame_position = (target_frame_position[0], target_frame_position[1], 0.0)
-    if len(source_frame_position) == 2:
-        source_frame_position = (source_frame_position[0], source_frame_position[1], 0.0)
-
     pts = np.asarray(points, dtype=float)
 
-    # rotation matrices from quaternions (scipy.spatial.transform.Rotation)
-    R_target = R.from_quat(target_frame_orientation).as_matrix()
-    R_source = R.from_quat(source_frame_orientation).as_matrix()
+    # get translation in desired format and rotation matrix from quaternion
+    t = np.asarray(frame_position_wrt_global, dtype=float)
+    if t.shape[0] == 2:
+        t = np.array([t[0], t[1], 0.0])
+    R_local_wrt_global = R.from_quat(frame_orientation_wrt_global).as_matrix()
+    
+    # apply rotation and translation to transform points to global frame
+    pts_global = (R_local_wrt_global @ pts.T).T + t
 
-    # relative rotation from source to target
-    R_rel = R_target.T @ R_source
+    return pts_global
+    
+def transform_quaternion_local_to_global(
+    quaternion_local,
+    frame_orientation_wrt_global,
+    ) -> List[float]:
+    """
+    Transform an orientation quaternion from local frame to global frame.
 
-    # translation from source origin to target origin, expressed in target frame
-    t_rel = np.asarray(source_frame_position) - np.asarray(target_frame_position)
-    t_in_target = R_target.T @ t_rel
+    :param quaternion_local: Quaternion (x,y,z,w) representing orientation in local frame.
+    :param frame_orientation_wrt_global: Quaternion (x,y,z,w) representing local-frame orientation
+                                        with respect to global frame.
+    :return: Quaternion expressed in global frame.
+    """
 
-    # correct transformation: rotate source point, then add translated origin
-    transformed_points = (R_rel @ pts.T).T + t_in_target
+    R_local = R.from_quat(quaternion_local)
+    R_frame_wrt_global = R.from_quat(frame_orientation_wrt_global)
+    R_global = R_frame_wrt_global * R_local
 
-    # return as 2D points
-    return transformed_points[:, :2]
+    return R_global.as_quat()
     
 def pose_from_points(points, use_ransac=False, max_iterations=100, distance_threshold=0.005, min_inliers_ratio=0.7):
     """
