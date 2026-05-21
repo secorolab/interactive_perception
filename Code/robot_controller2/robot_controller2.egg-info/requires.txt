@@ -1,0 +1,6 @@
+setuptools
+rclpy
+networkx
+mapbox-earcut
+core-algorithm
+PyYAML

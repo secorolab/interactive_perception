@@ -1,0 +1,8 @@
+[console_scripts]
+Evaluation = robot_controller2.Evaluation:main
+GT_Visualizer = robot_controller2.GT_Visualizer:main
+Reasoner_refactored = robot_controller2.Reasoner_refactored:main
+Templates = robot_controller2.Templates:main
+Util = robot_controller2.Util:main
+Visualizer = robot_controller2.Visualizer:main
+test_ms = robot_controller2.test_motion_spec:main

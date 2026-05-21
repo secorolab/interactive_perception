@@ -179,12 +179,31 @@ class GT_VisualizerNode(Node):
 
         for marker_id, pose in zip(msg.marker_ids, msg.poses):
             if marker_id not in ground_truth:
-                poses.append(pose.position)
+                pose_in = PoseStamped()
+                pose_in.header.stamp = Time(seconds=0).to_msg()
+                pose_in.header.frame_id = 'camera_color_frame'
+
+                pose_in.pose.position.x = pose.position.x
+                pose_in.pose.position.y = pose.position.y
+                pose_in.pose.position.z = pose.position.z
+                pose_in.pose.orientation = pose.orientation
+                print(pose_in.pose)
+                try:
+                    pose_out = self.tf_buffer.transform(
+                        pose_in,
+                        'eddie_base_link',
+                        timeout=Duration(seconds=0.5)
+                    )
+                except TransformException as ex:
+                    self.get_logger().warn(f'Could not transform Pose: {ex}')
+                    return
                 ground_truth[marker_id] = {
-                    "position": pose.position,
-                    "orientation": pose.orientation,
-                    "frame_id": frame_id
+                    "position": pose_out.pose.position,
+                    "orientation": pose_out.pose.orientation,
+                    "frame_id": pose_out.header.frame_id
                 }
+                poses.append(pose_out.pose.position)
+                print(pose_out)
 
 
     def plane_callback(self, msg):
@@ -242,6 +261,9 @@ class GT_VisualizerNode(Node):
         if not ground_truth:
             return
 
+        if len(ground_truth) < 4:
+            return
+
         #Compute fixed transform only once
         if not self.ground_truth_computed:
             all_poses = []
@@ -271,65 +293,73 @@ class GT_VisualizerNode(Node):
             pose_in.pose.position.y = pos.y
             pose_in.pose.position.z = pos.z
             pose_in.pose.orientation = ori
+            #
+            # try:
+            #     pose_out = self.tf_buffer.transform(
+            #         pose_in,
+            #         'eddie_base_link',
+            #         timeout=Duration(seconds=0.5)
+            #     )
+            # except TransformException as ex:
+            #     self.get_logger().warn(f'Could not transform Pose: {ex}')
+            #     return
 
-            try:
-                pose_out = self.tf_buffer.transform(
-                    pose_in,
-                    'eddie_base_link',
-                    timeout=Duration(seconds=0.5)
-                )
-            except TransformException as ex:
-                self.get_logger().warn(f'Could not transform Pose: {ex}')
-                return
-
-            self.publisher_centroid.publish(pose_out)
+            self.publisher_centroid.publish(pose_in)
 
             # Save the fixed transform
             self.fixed_tf = TransformStamped()
             self.fixed_tf.header.frame_id = 'eddie_base_link'
             self.fixed_tf.child_frame_id = 'ground_truth_object'
-            self.fixed_tf.transform.translation.x = pose_out.pose.position.x
-            self.fixed_tf.transform.translation.y = pose_out.pose.position.y
-            self.fixed_tf.transform.translation.z = pose_out.pose.position.z
-            self.fixed_tf.transform.rotation = pose_out.pose.orientation
+            self.fixed_tf.transform.translation.x = pose_in.pose.position.x
+            self.fixed_tf.transform.translation.y = pose_in.pose.position.y
+            self.fixed_tf.transform.translation.z = pose_in.pose.position.z
+            self.fixed_tf.transform.rotation = pose_in.pose.orientation
 
             # Publish Plane Marker
-            fixed_marker = Marker()
-            fixed_marker.header.frame_id = "ground_truth_object"
-            fixed_marker.header.stamp = self.get_clock().now().to_msg()
-            fixed_marker.ns = "surface"
-            fixed_marker.id = 0
-            fixed_marker.type = Marker.TRIANGLE_LIST
-            fixed_marker.action = Marker.ADD
-            fixed_marker.pose.orientation.w = 1.0
+            # fixed_marker = Marker()
+            # fixed_marker.header.frame_id = "ground_truth_object"
+            # fixed_marker.header.stamp = self.get_clock().now().to_msg()
+            # fixed_marker.ns = "ground_truth_surface"
+            # fixed_marker.id = 0
+            # fixed_marker.type = Marker.TRIANGLE_LIST
+            # fixed_marker.action = Marker.ADD
+            # fixed_marker.pose.orientation.w = 1.0
 
-            # Hardcoded object dimensions
-            x_len = 0.6    #0.31  #0.34
-            y_len = 0.34   #0.98  #0.6
+            # # Hardcoded object dimensions
+            # x_len = 0.6    #0.31  #0.34
+            # y_len = 0.34   #0.98  #0.6
+            #
+            # # Define rectangle corners
+            # p0 = Point(x=-x_len / 2, y=-y_len / 2, z=0.0)
+            # p1 = Point(x=x_len / 2, y=-y_len / 2, z=0.0)
+            # p2 = Point(x=x_len / 2, y=y_len / 2, z=0.0)
+            # p3 = Point(x=-x_len / 2, y=y_len / 2, z=0.0)
+            #
+            # poses = [p0, p1, p2, p3]
 
-            # Define rectangle corners
-            p0 = Point(x=-x_len / 2, y=-y_len / 2, z=0.0)
-            p1 = Point(x=x_len / 2, y=-y_len / 2, z=0.0)
-            p2 = Point(x=x_len / 2, y=y_len / 2, z=0.0)
-            p3 = Point(x=-x_len / 2, y=y_len / 2, z=0.0)
+            # poses = []
+            #
+            # for pose in all_poses:
+            #     poses.append(Point(x=pose[0], y=pose[1], z=pose[2]))
 
-            poses = [p0, p1, p2, p3]
-
-            for pose in poses:
-                self.publisher_point.publish(pose)
+            # for pose in poses:
+            #     self.publisher_point.publish(pose)
 
             # Add rectangle as two triangles
-            fixed_marker.points.extend([p0, p1, p2])
-            fixed_marker.points.extend([p0, p2, p3])
+            # fixed_marker.points.extend([p0, p1, p2])
+            # fixed_marker.points.extend([p0, p2, p3])
 
-            fixed_marker.scale.x = 1.0
-            fixed_marker.scale.y = 1.0
-            fixed_marker.scale.z = 1.0
-
-            fixed_marker.color.r = 1.0
-            fixed_marker.color.g = 0.0
-            fixed_marker.color.b = 0.5
-            fixed_marker.color.a = 0.4
+            # fixed_marker.points.extend([poses[0], poses[1], poses[2]])
+            # fixed_marker.points.extend([poses[0], poses[2], poses[3]])
+            #
+            # fixed_marker.scale.x = 1.0
+            # fixed_marker.scale.y = 1.0
+            # fixed_marker.scale.z = 1.0
+            #
+            # fixed_marker.color.r = 1.0
+            # fixed_marker.color.g = 0.0
+            # fixed_marker.color.b = 0.5
+            # fixed_marker.color.a = 0.4
 
             self.ground_truth_computed = True
 
@@ -337,8 +367,8 @@ class GT_VisualizerNode(Node):
         if self.fixed_tf:
             self.fixed_tf.header.stamp = self.get_clock().now().to_msg()
             self.br.sendTransform(self.fixed_tf)
-            fixed_marker.header.stamp = self.get_clock().now().to_msg()
-            self.publisher.publish(fixed_marker)
+            # fixed_marker.header.stamp = self.get_clock().now().to_msg()
+            # self.publisher.publish(fixed_marker)
 
 
 
@@ -382,41 +412,77 @@ class GT_VisualizerNode(Node):
 
         self.br.sendTransform(t)
 
+        if self.fixed_tf and len(poses) >= 4:
 
-        out = []
+            # out = []
+            #
+            # for i, point_msg in enumerate(poses):
+            #     point_in = PointStamped()
+            #     point_in.header.stamp = Time(seconds=0).to_msg()
+            #     point_in.header.frame_id = 'camera_color_frame'
+            #
+            #     point_in.point.x = point_msg.x
+            #     point_in.point.y = point_msg.y
+            #     point_in.point.z = point_msg.z
+            #
+            #     try:
+            #         point_out = self.tf_buffer.transform(
+            #             point_in,
+            #             'eddie_base_link',
+            #             timeout=Duration(seconds=0.1)
+            #         )
+            #         out.append(point_out)
+            #
+            #     except TransformException as ex:
+            #         self.get_logger().warn(
+            #             f'Could not transform Point'
+            #         )
+            #         break
+            #
+            # list_out = []
+            # for stamped_point in out:
+            #     point = stamped_point.point
+            #     x = float(point.x)  #
+            #     y = float(point.y)
+            #     z = float(point.z)
+            #     list_out.append([x, y, z])
+            #
+            # tf_poses = list_out
+            # print(tf_poses)
 
-        for i, point_msg in enumerate(poses):
-            point_in = PointStamped()
-            point_in.header.stamp = Time(seconds=0).to_msg()
-            point_in.header.frame_id = 'ground_truth_object'
 
-            point_in.point.x = point_msg.x
-            point_in.point.y = point_msg.y
-            point_in.point.z = point_msg.z
+                    # Publish Plane Marker
+            fixed_marker = Marker()
+            fixed_marker.header.frame_id = "eddie_base_link"
+            fixed_marker.header.stamp = self.get_clock().now().to_msg()
+            fixed_marker.ns = "ground_truth_surface"
+            fixed_marker.id = 0
+            fixed_marker.type = Marker.TRIANGLE_LIST
+            fixed_marker.action = Marker.ADD
+            fixed_marker.pose.orientation.w = 1.0
 
-            try:
-                point_out = self.tf_buffer.transform(
-                    point_in,
-                    'eddie_base_link',
-                    timeout=Duration(seconds=0.1)
-                )
-                out.append(point_out)
+            publish_poses = []
 
-            except TransformException as ex:
-                self.get_logger().warn(
-                    f'Could not transform Point'
-                )
-                break
+            for pose in poses:
+                publish_poses.append(Point(x=pose.x, y=pose.y, z=pose.z))
+                self.publisher_point.publish(Point(x=pose.x, y=pose.y, z=pose.z))
 
-        list_out = []
-        for stamped_point in out:
-            point = stamped_point.point
-            x = float(point.x)  #
-            y = float(point.y)
-            z = float(point.z)
-            list_out.append([x, y, z])
 
-        tf_poses = list_out
+            fixed_marker.points.extend([publish_poses[0], publish_poses[1], publish_poses[2]])
+            fixed_marker.points.extend([publish_poses[0], publish_poses[2], publish_poses[3]])
+
+            fixed_marker.scale.x = 1.0
+            fixed_marker.scale.y = 1.0
+            fixed_marker.scale.z = 1.0
+
+            fixed_marker.color.r = 1.0
+            fixed_marker.color.g = 0.0
+            fixed_marker.color.b = 0.5
+            fixed_marker.color.a = 0.4
+
+
+            fixed_marker.header.stamp = self.get_clock().now().to_msg()
+            self.publisher.publish(fixed_marker)
 
 
 
