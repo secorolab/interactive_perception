@@ -1,0 +1,36 @@
+launch options:
+
+LAUNCH FOR PLAN
+
+cd ~/Master-thesis/Project-Code/ros2_ws
+colcon build (bws)
+source install/local_setup.bash (sws) change in rosrc
+rviz2 -d /home/linux/Master-thesis/Project-Code/ros2_ws/src/interactive_perception/Code/robot_controller2/robot_controller2/resources/config2.rviz
+ros2 run motion_specification_action motion_specification_action_server
+ros2 run robot_controller2 Visualizer
+ros2 run robot_controller2 GT_Visualizer
+ros2 run robot_controller2 Evaluation 
+ros2 run robot_controller2 Reasoner
+
+
+LAUNCH FOR MARKER DETECTION
+cd ~/python_venvs/
+source ~/python_venvs/aruco_venv/bin/activate
+cd ~/Master-thesis/Project-Code/ros2_ws
+bws
+source install/setup.bash 
+ros2 launch aruco_pose_estimation aruco_pose_estimation.launch.py 
+cd ~/Master-thesis/Project-Code/ros2_ws
+source install/setup.bash 
+ros2 launch kinova_vision kinova_vision.launch.py device:=192.168.1.12 
+ros2 run robot_controller2 GT_Visualizer
+
+
+ros2 bag record -o "e4_r1" /corner_position /marker_position /plane_position /tf /tf_static /visualization_marker /ground_truth_corners /ground_truth_centroid /ee_pose /motion_specification/goal /motion_specification/result
+
+
+ros2 bag record -o "e4_r1" \
+  /corner_position /marker_position /plane_position /tf /tf_static /visualization_marker /ground_truth_corners /ground_truth_centroid /ee_pose 
+
+
+

@@ -145,50 +145,50 @@ class Eval_Node(Node):
         self.subscription = self.create_subscription(
             PoseStamped,
             '/corner_position',
-            self.corner_callback,
+            self.estimated_corners_callback,
             10
         )
 
         self.subscription = self.create_subscription(
             PoseStamped,
             '/plane_position',
-            self.plane_callback,
+            self.estimated_pose_callback,
             10
         )
 
         self.subscription = self.create_subscription(
             Point,
             '/ground_truth_corners',
-            self.point_callback,
+            self.ground_truth_corners_callback,
             10
         )
 
         self.subscription = self.create_subscription(
             PoseStamped,
             '/ground_truth_centroid',
-            self.centroid_callback,
+            self.ground_truth_pose_callback,
             10
         )
 
-    def corner_callback(self, msg):
+    def estimated_corners_callback(self, msg):
         position = msg.pose.position
         orientation = msg.pose.orientation
         frame_id = msg.header.frame_id
         estimated_corners.append([position, frame_id])
 
-    def plane_callback(self, msg):
+    def estimated_pose_callback(self, msg):
         position = msg.pose.position
         orientation = msg.pose.orientation
         frame_id = msg.header.frame_id
         estimated_pose.append([position, orientation, frame_id])
 
-    def centroid_callback(self, msg):
+    def ground_truth_pose_callback(self, msg):
         position = msg.pose.position
         orientation = msg.pose.orientation
         frame_id = msg.header.frame_id
         ground_truth_pose.append([position, orientation, frame_id])
 
-    def point_callback(self, msg):
+    def ground_truth_corners_callback(self, msg):
         position = msg
         ground_truth_corners.append(position)
 
