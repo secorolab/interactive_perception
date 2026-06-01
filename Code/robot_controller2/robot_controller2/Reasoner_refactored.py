@@ -715,12 +715,36 @@ class ReasonerNode(ROSNode):
                     self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 self.send_goal(ms_to_execute)
     
+    def publish_corners_and_estimate_plane(self):
+        corner_points = []
+        # collect corner points
+        for i in range(self.n_sides):
+            if self.rck.corners[i] is not None:
+                point = self.rck.corners[i]
+                corner_points.append((point.x, point.y, point.z))
+        
+                self.create_and_publish_marker_pose(
+                    position=point, 
+                    orientation=self.current_orientation, 
+                    marker_type="corner", 
+                    frame="marker_frame_0"
+                )
+        
+        est_plane_origin_position, est_plane_orientation = Util.pose_from_points(points=corner_points, use_ransac=False)
+        self.create_and_publish_marker_pose(
+            position=est_plane_origin_position, 
+            orientation=est_plane_orientation, 
+            marker_type="plane", 
+            frame="marker_frame_0"
+        )
+    
     def main_loop(self):
         """
         Main reasoning loop executed on timer.
         """
         # exit condition
         if self.dof == 0:
+            self.publish_corners_and_estimate_plane()
             self.exploration_complete = True
             self.get_logger().info("Exploration complete - all parameters known")
             rclpy.shutdown()
@@ -936,6 +960,7 @@ class ReasonerNode(ROSNode):
                 print(f"Degrees of freedom: {self.dof}")
                 if self.dof == 0:
                     self.exploration_complete = True
+                    self.publish_corners_and_estimate_plane()
                     self.get_logger().info("Exploration complete - all parameters known")
                     rclpy.shutdown()
                 else:

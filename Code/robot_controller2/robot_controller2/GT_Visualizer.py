@@ -1,515 +1,439 @@
-import rclpy
-from rclpy.node import Node
-from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Point
-from std_msgs.msg import ColorRGBA
-import rclpy
-from rclpy.node import Node
-import tf2_ros
-import geometry_msgs.msg
-from rclpy.time import Time
-from tf2_ros import TransformBroadcaster
-from geometry_msgs.msg import TransformStamped
-import tf2_geometry_msgs  # Import this for transforming geometry_msgs
 import math
-import random
-from geometry_msgs.msg import Quaternion
-from geometry_msgs.msg import PoseStamped
-from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Point
-from builtin_interfaces.msg import Duration
-import mapbox_earcut as earcut
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
+
 import numpy as np
+import rclpy
+import tf2_ros
+from builtin_interfaces.msg import Duration as BuiltinDuration
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, TransformStamped
+from rclpy.duration import Duration
+from rclpy.node import Node
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformException, TransformListener
+from visualization_msgs.msg import Marker
+from scipy.spatial.transform import Rotation as R 
+from enum import Enum
 
 try:
     from aruco_interfaces.msg import ArucoMarkers
 except ImportError:
     ArucoMarkers = None
-from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Point
-from geometry_msgs.msg import PointStamped
-from rclpy.node import Node
-from tf2_ros import Buffer, TransformListener
-import geometry_msgs.msg
-from geometry_msgs.msg import PointStamped
-from tf2_ros import TransformException
-from rclpy.duration import Duration
-from geometry_msgs.msg import PoseStamped
-from tf2_ros import StaticTransformBroadcaster
-from scipy.spatial.transform import Rotation as Rscipy
 
+@dataclass
+class MarkerObservation:
+    position: Point
+    orientation: Quaternion
+    frame_id: str
 
-from scipy.spatial.transform import Rotation as R  # for quaternion math
+class ModeOfComputation(Enum):
+    MARKERS_FOR_POSE_GIVEN_DIMENSIONS = 1
+    MARKERS_FOR_POSE_AND_DIMENSIONS = 2
+    # MARKERS_FOR_ORIENTATION_ONLY = 3
+    
+class EXPERIMENT_CONFIG(Enum):
+    SINGLE_RECT_SURFACE_FLAT = 1
+    SINGLE_RECT_SURFACE_WITH_SLOPE = 2
+    
 
-ground_truth = {}
+def pose_from_points(points: Sequence[Point]) -> Tuple[Point, Quaternion]:
+    """Compute a plane pose from marker corner positions in a common frame."""
+    point_array = np.array([[point.x, point.y, point.z] for point in points], dtype=np.float64)
+    if point_array.shape[0] < 4:
+        raise ValueError("Need at least 4 marker points to compute ground truth pose")
 
-used_gt_ids = set()
+    centroid = np.mean(point_array, axis=0)
 
-last_marker = None
-
-used_plane_ids = set()
-
-poses = []
-
-fixed_marker = None
-
-tf_poses = []
-
-planes = []
-
-def generate_unique_gt_id():
-    gt_id = 0
-    while gt_id in used_gt_ids:
-        gt_id += 1
-    used_plane_ids.add(gt_id)
-    return gt_id
-
-def euler_to_quaternion(roll, pitch, yaw):
-    qx = math.sin(roll / 2) * math.cos(pitch / 2) * math.cos(yaw / 2) - math.cos(roll / 2) * math.sin(
-        pitch / 2) * math.sin(yaw / 2)
-    qy = math.cos(roll / 2) * math.sin(pitch / 2) * math.cos(yaw / 2) + math.sin(roll / 2) * math.cos(
-        pitch / 2) * math.sin(yaw / 2)
-    qz = math.cos(roll / 2) * math.cos(pitch / 2) * math.sin(yaw / 2) - math.sin(roll / 2) * math.sin(
-        pitch / 2) * math.cos(yaw / 2)
-    qw = math.cos(roll / 2) * math.cos(pitch / 2) * math.cos(yaw / 2) + math.sin(roll / 2) * math.sin(
-        pitch / 2) * math.sin(yaw / 2)
-
-    return [qx, qy, qz, qw]
-
-
-def pose_from_points(points):
-    """
-    Compute pose from points:
-      - x-axis points exactly from points[idx_x[0]] to points[idx_x[1]]
-      - z-axis is plane normal (from PCA)
-      - y-axis = z x x to make right-handed frame
-    This is almost the same as the one from Reasoner.
-    """
-    pts = np.array(points)
-    if pts.shape[0] < 3:
-        raise ValueError("Need at least 3 points")
-
-    # Centroid
-    centroid = np.mean(pts, axis=0)
-
-    # Plane normal via PCA
-    cov = np.cov((pts - centroid).T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    z_axis = eigvecs[:, np.argmin(eigvals)]
+    covariance = np.cov((point_array - centroid).T)
+    _, eigenvectors = np.linalg.eigh(covariance)
+    z_axis = eigenvectors[:, 0]
     z_axis /= np.linalg.norm(z_axis)
 
-    # X axis exactly between two points
-    #x_axis = pts[5] - pts[4]
-    x_axis = pts[1] - pts[3]
+    # Preserve the original marker ordering convention: x points from marker 3 to marker 1.
+    x_axis = point_array[0] - point_array[3]
     x_axis /= np.linalg.norm(x_axis)
 
-    # Make z perpendicular to x
     z_axis = z_axis - np.dot(z_axis, x_axis) * x_axis
     z_axis /= np.linalg.norm(z_axis)
 
-    # Y axis for right-handed frame
     y_axis = np.cross(z_axis, x_axis)
     y_axis /= np.linalg.norm(y_axis)
-
-    # Recompute z to ensure exact orthonormality
     z_axis = np.cross(x_axis, y_axis)
 
-    # Rotation matrix: columns = [x, y, z]
-    R_mat = np.column_stack((x_axis, y_axis, z_axis))
-    quaternion = R.from_matrix(R_mat).as_quat()
-
-    return centroid, quaternion
+    rotation_matrix = np.column_stack((x_axis, y_axis, z_axis))
+    quaternion_from_rot_matrix = R.from_matrix(rotation_matrix).as_quat()
+    
+    return (
+        Point(x=float(centroid[0]), y=float(centroid[1]), z=float(centroid[2])),
+        Quaternion(x=float(quaternion_from_rot_matrix[0]), y=float(quaternion_from_rot_matrix[1]), z=float(quaternion_from_rot_matrix[2]), w=float(quaternion_from_rot_matrix[3]))
+    )
 
 
 class GT_VisualizerNode(Node):
+    """Publishes ArUco-derived ground truth geometry and supporting TF frames."""
 
     def __init__(self):
+        super().__init__("gt_visualizer_node")
 
-        global ground_truth
-        super().__init__('gt_visualizer_node')
+        self.declare_parameter("aruco_topic", "/aruco/markers")
+        self.declare_parameter("ee_pose_topic", "/ee_pose")
+        self.declare_parameter("plane_topic", "/plane_position")
+        self.declare_parameter("target_frame", "eddie_base_link")
+        self.declare_parameter("map_frame", "map")
+        self.declare_parameter("camera_frame", "camera_color_frame")
+        self.declare_parameter("end_effector_frame", "end_effector")
+        self.declare_parameter("ground_truth_frame", "ground_truth_object")
+        self.declare_parameter("map_to_base_xyz", [2.0, 2.28, 0.8])
+        self.declare_parameter("ee_to_camera_xyz", [0.0, 0.05639, -0.00305])
 
-        self.publisher = self.create_publisher(Marker, '/visualization_marker', 10)
+        self.aruco_topic = self.get_parameter("aruco_topic").value
+        self.ee_pose_topic = self.get_parameter("ee_pose_topic").value
+        self.plane_topic = self.get_parameter("plane_topic").value
+        self.target_frame = self.get_parameter("target_frame").value
+        self.map_frame = self.get_parameter("map_frame").value
+        self.camera_frame = self.get_parameter("camera_frame").value
+        self.end_effector_frame = self.get_parameter("end_effector_frame").value
+        self.ground_truth_frame = self.get_parameter("ground_truth_frame").value
+        self.map_to_base_xyz = self._parameter_vector("map_to_base_xyz", 3)
+        self.ee_to_camera_xyz = self._parameter_vector("ee_to_camera_xyz", 3)
 
-        self.publisher_point = self.create_publisher(Point, '/ground_truth_corners', 10)
-
-        self.publisher_centroid = self.create_publisher(PoseStamped, '/ground_truth_centroid', 10)
-
-        self.br = tf2_ros.TransformBroadcaster(self)
-
+        self.marker_pub = self.create_publisher(Marker, "/visualization_marker", 10)
+        self.corner_pub = self.create_publisher(Point, "/ground_truth_corners", 10)
+        self.centroid_pub = self.create_publisher(PoseStamped, "/ground_truth_centroid", 10)
+        self.centroid_msg = PoseStamped()
+        
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        self.ground_truth: Dict[int, MarkerObservation] = {}
+        self.plane_observations: List[Pose] = []
         self.ground_truth_computed = False
-        self.fixed_tf = None
+        self.fixed_ground_truth_tf: Optional[TransformStamped] = None
 
-        self.timer = self.create_timer(0.5, self.publish_gt)
+        self.create_timer(0.5, self.publish_ground_truth)
+        self.create_timer(1.0, self.publish_support_transforms)
 
-        self.transform_timer = self.create_timer(1.0, self.send_transform)
+        if ArucoMarkers is None:
+            self.get_logger().warn("aruco_interfaces is unavailable; ArUco ground truth is disabled")
+        else:
+            self.create_subscription(ArucoMarkers, self.aruco_topic, self.ground_truth_callback, 10)
 
-        print("Created GT_Visualizer Node.")
+        self.create_subscription(PoseStamped, self.ee_pose_topic, self.ee_callback, 2)
+        self.create_subscription(PoseStamped, self.plane_topic, self.plane_callback, 10)
 
+        self.mode_of_computation = ModeOfComputation.MARKERS_FOR_POSE_GIVEN_DIMENSIONS
+        self.experiment_config = EXPERIMENT_CONFIG.SINGLE_RECT_SURFACE_FLAT
+        
+        if self.mode_of_computation == ModeOfComputation.MARKERS_FOR_POSE_GIVEN_DIMENSIONS:
+            self.get_logger().info("Mode: MARKERS_FOR_POSE_GIVEN_DIMENSIONS - using marker positions to compute pose given dimensions of the object.")
+            if self.experiment_config == EXPERIMENT_CONFIG.SINGLE_RECT_SURFACE_FLAT:
+                self.get_logger().info("Experiment Config: SINGLE_RECT_SURFACE_FLAT - expecting a single rectangular surface lying flat on the table.")
+                self.n_surfaces = 1
+                for i in range(self.n_surfaces):
+                    self.n_sides = 4
+                    self.length = 0.4890
+                    self.width = 0.25
+            elif self.experiment_config == EXPERIMENT_CONFIG.SINGLE_RECT_SURFACE_WITH_SLOPE:
+                self.get_logger().info("Experiment Config: SINGLE_RECT_SURFACE_WITH_SLOPE - expecting a single rectangular surface with a slope.")
+                self.n_surfaces = 1
+                for i in range(self.n_surfaces):
+                    self.n_sides = 4
+                    self.length = 0.4890
+                    self.width = 0.25
+                    self.slope_angle_degrees = 30.0
 
-        if ArucoMarkers:
-            self.create_subscription(
-                ArucoMarkers,
-                "/aruco/markers",
-                self.ground_truth_callback,
-                10
-            )
-        self.subscription = self.create_subscription(
-            PoseStamped,
-            '/ee_pose',
-            self.ee_callback,
-            2
-        )
-        self.subscription = self.create_subscription(
-            PoseStamped,
-            '/plane_position',
-            self.plane_callback,
-            10
-        )
+        self.get_logger().info("Created GT_Visualizer node")
 
-    def ground_truth_callback(self, msg):
-        """
-        Update ground_truth only when a new marker_id is received.
-        Existing markers are left unchanged.
-        """
-        global ground_truth, poses
-        frame_id = msg.header.frame_id
+    def _parameter_vector(self, name: str, expected_length: int) -> List[float]:
+        value = list(self.get_parameter(name).value)
+        if len(value) != expected_length:
+            raise ValueError(f"Parameter '{name}' must contain {expected_length} values")
+        return [float(item) for item in value]
+
+    def ground_truth_callback(self, msg) -> None:
+        """Store the first transformed pose for each ArUco marker id."""
+        source_frame = msg.header.frame_id or self.camera_frame
 
         for marker_id, pose in zip(msg.marker_ids, msg.poses):
-            if marker_id not in ground_truth:
-                pose_in = PoseStamped()
-                pose_in.header.stamp = Time(seconds=0).to_msg()
-                pose_in.header.frame_id = 'camera_color_frame'
+            marker_id = int(marker_id)
+            if marker_id in self.ground_truth:
+                continue
 
-                pose_in.pose.position.x = pose.position.x
-                pose_in.pose.position.y = pose.position.y
-                pose_in.pose.position.z = pose.position.z
-                pose_in.pose.orientation = pose.orientation
-                print(pose_in.pose)
-                try:
-                    pose_out = self.tf_buffer.transform(
-                        pose_in,
-                        'eddie_base_link',
-                        timeout=Duration(seconds=0.5)
-                    )
-                except TransformException as ex:
-                    self.get_logger().warn(f'Could not transform Pose: {ex}')
-                    return
-                ground_truth[marker_id] = {
-                    "position": pose_out.pose.position,
-                    "orientation": pose_out.pose.orientation,
-                    "frame_id": pose_out.header.frame_id
-                }
-                poses.append(pose_out.pose.position)
-                print(pose_out)
+            pose_in = PoseStamped()
+            pose_in.header.stamp = Time(seconds=0).to_msg()
+            pose_in.header.frame_id = source_frame
+            pose_in.pose = pose
 
+            try:
+                pose_out = self.tf_buffer.transform(
+                    pose_in,
+                    self.target_frame,
+                    timeout=Duration(seconds=0.5),
+                )
+            except TransformException as exc:
+                self.get_logger().warn(
+                    f"Could not transform ArUco marker {marker_id} "
+                    f"from {source_frame} to {self.target_frame}: {exc}"
+                )
+                continue
 
-    def plane_callback(self, msg):
-        position = msg.pose.position
-        orientation = msg.pose.orientation
-        frame_id = msg.header.frame_id
-        planes.append([position, orientation])
+            # get user consent if the marker_id value pose in camera_color_frame 
+            # is acceptable to be added to the ground truth. 
+            # This is to prevent adding wrong markers due to noise or detection errors.
+            quaternion_to_euler = R.from_quat([
+                pose_in.pose.orientation.x,
+                pose_in.pose.orientation.y,
+                pose_in.pose.orientation.z,
+                pose_in.pose.orientation.w
+            ]).as_euler('zyx', degrees=True)
+            
+            prompt = (
+                f"Add marker {marker_id} pose from camera_color_frame to ground truth? "
+                f"position=({pose_in.pose.position.x:.4f}, "
+                f"{pose_in.pose.position.y:.4f}, "
+                f"{pose_in.pose.position.z:.4f}), "
+                f"orientation=({quaternion_to_euler[0]:.1f}°, "
+                f"{quaternion_to_euler[1]:.1f}°, "
+                f"{quaternion_to_euler[2]:.1f}°), [y/N]: "
+            )
+            try:
+                consent = input(prompt).strip().lower()
+            except EOFError:
+                consent = ""
 
+            if consent not in ("y", "yes"):
+                self.get_logger().info(
+                    f"Skipped marker {marker_id}; user did not approve the camera_color_frame pose."
+                )
+                continue
 
-    def ee_callback(self, msg):
+            self.ground_truth[marker_id] = MarkerObservation(
+                position=pose_out.pose.position,
+                orientation=pose_out.pose.orientation,
+                frame_id=pose_out.header.frame_id,
+            )
+            self.get_logger().info(
+                f"Stored ground truth marker {marker_id} in {pose_out.header.frame_id}: "
+                f"({pose_out.pose.position.x:.3f}, "
+                f"{pose_out.pose.position.y:.3f}, "
+                f"{pose_out.pose.position.z:.3f})"
+            )
+
+    def plane_callback(self, msg: PoseStamped) -> None:
+        self.plane_observations.append(msg.pose)
+
+    def ee_callback(self, msg: PoseStamped) -> None:
         transform = TransformStamped()
         transform.header.stamp = self.get_clock().now().to_msg()
         transform.header.frame_id = msg.header.frame_id
-        transform.child_frame_id = "end_effector"
-
+        transform.child_frame_id = self.end_effector_frame
         transform.transform.translation.x = msg.pose.position.x
         transform.transform.translation.y = msg.pose.position.y
         transform.transform.translation.z = msg.pose.position.z
-
         transform.transform.rotation = msg.pose.orientation
+        self.tf_broadcaster.sendTransform(transform)
 
-        self.br.sendTransform(transform)
-
-
-    def publish_surface_marker(self):
-        global last_marker
-
-        # Build a new marker from the current ground truth
-        new_marker = self.make_surface_marker()
-        if not new_marker:
+    def publish_ground_truth(self) -> None:
+        if len(self.ground_truth) < 4:
             return
 
-        # Check if last_marker exists and has the same attributes
-        if last_marker:
-            desired_points = len(new_marker.points) == len(last_marker.points)
-            same_ns = new_marker.ns == last_marker.ns
-            same_id = new_marker.id == last_marker.id
-
-            if desired_points and same_ns and same_id:
-                # Nothing changed, reuse the old marker
-                self.publisher.publish(last_marker)
+        if not self.ground_truth_computed:
+            try:
+                self.compute_ground_truth_pose()
+            except ValueError as exc:
+                self.get_logger().warn(str(exc))
                 return
 
-        # Otherwise, publish the new marker and save it
-        new_marker.ns = "surface"
-        new_marker.id = 0
-        new_marker.action = Marker.ADD
-        self.publisher.publish(new_marker)
-        last_marker = new_marker
+        if self.fixed_ground_truth_tf is not None:
+            self.fixed_ground_truth_tf.header.stamp = self.get_clock().now().to_msg()
+            self.tf_broadcaster.sendTransform(self.fixed_ground_truth_tf)
 
+    def compute_ground_truth_pose(self) -> None:
+        ordered_points = [
+            observation.position
+            for _, observation in sorted(self.ground_truth.items(), key=lambda item: item[0])
+        ]
+        centroid, orientation = pose_from_points(ordered_points)
 
+        self.centroid_msg.header.stamp = self.get_clock().now().to_msg()
+        self.centroid_msg.header.frame_id = self.target_frame
+        self.centroid_msg.pose.position = centroid
+        self.centroid_msg.pose.orientation = orientation
+        self.centroid_pub.publish(self.centroid_msg)
 
-    def publish_gt(self):
-        global ground_truth, poses, fixed_marker
-        if not ground_truth:
+        self.fixed_ground_truth_tf = TransformStamped()
+        self.fixed_ground_truth_tf.header.frame_id = self.target_frame
+        self.fixed_ground_truth_tf.child_frame_id = self.ground_truth_frame
+        self.fixed_ground_truth_tf.transform.translation.x = centroid.x
+        self.fixed_ground_truth_tf.transform.translation.y = centroid.y
+        self.fixed_ground_truth_tf.transform.translation.z = centroid.z
+        self.fixed_ground_truth_tf.transform.rotation = orientation
+
+        euler_ang_deg = R.from_quat([
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w
+        ]).as_euler('zyx', degrees=True)
+        
+        self.ground_truth_computed = True
+        self.get_logger().info(
+            f"Computed {self.ground_truth_frame} from {len(ordered_points)} markers in {self.target_frame}. \
+            Centroid: ({centroid.x:.3f}, {centroid.y:.3f}, {centroid.z:.3f}). \
+            Orientation (euler): ({euler_ang_deg[0]:.3f}, {euler_ang_deg[1]:.3f}, {euler_ang_deg[2]:.3f})"
+        )
+
+    def publish_support_transforms(self) -> None:
+        now = self.get_clock().now().to_msg()
+        
+        zero_quat_array = R.from_euler('XYZ', 
+                                       [0.0, 0.0, 0.0], 
+                                       degrees=True).as_quat()
+        zero_quat = Quaternion(x=float(zero_quat_array[0]), y=float(zero_quat_array[1]), 
+                              z=float(zero_quat_array[2]), w=float(zero_quat_array[3]))
+
+        self.tf_broadcaster.sendTransform(
+            self.make_transform(
+                self.map_frame,
+                self.target_frame,
+                self.map_to_base_xyz,
+                zero_quat,
+                now,
+            )
+        )
+        
+        quat_array = R.from_euler('XYZ', 
+                                  [180.0, 180.0, 0.0], 
+                                  degrees=True).as_quat()
+        quat = Quaternion(x=float(quat_array[0]), y=float(quat_array[1]), 
+                         z=float(quat_array[2]), w=float(quat_array[3]))
+        self.tf_broadcaster.sendTransform(
+            self.make_transform(
+                self.end_effector_frame,
+                self.camera_frame,
+                self.ee_to_camera_xyz,
+                quat,
+                now,
+            )
+        )
+
+        if self.fixed_ground_truth_tf is not None:
+            self.publish_ground_truth_corners()
+            self.publish_ground_truth_surface()
+            self.publish_centroid()
+
+    def make_transform(
+        self,
+        parent_frame: str,
+        child_frame: str,
+        translation: Sequence[float],
+        rotation: Quaternion,
+        stamp,
+    ) -> TransformStamped:
+        transform = TransformStamped()
+        transform.header.stamp = stamp
+        transform.header.frame_id = parent_frame
+        transform.child_frame_id = child_frame
+        transform.transform.translation.x = float(translation[0])
+        transform.transform.translation.y = float(translation[1])
+        transform.transform.translation.z = float(translation[2])
+        transform.transform.rotation = rotation
+        return transform
+
+    def publish_ground_truth_corners(self) -> None:
+        for point in self.ordered_ground_truth_points():
+            self.corner_pub.publish(point)
+
+    def publish_centroid(self) -> None:
+        if self.fixed_ground_truth_tf is None:
+            return
+        self.centroid_pub.publish(self.centroid_msg)
+
+    def publish_ground_truth_surface(self) -> None:
+        points = self.ordered_ground_truth_points()
+        if len(points) < 4:
             return
 
-        if len(ground_truth) < 4:
-            return
+        marker = Marker()
+        marker.header.frame_id = self.target_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "ground_truth_surface"
+        marker.id = 0
+        marker.type = Marker.TRIANGLE_LIST
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.lifetime = BuiltinDuration(sec=0)
 
-        #Compute fixed transform only once
-        if not self.ground_truth_computed:
-            all_poses = []
+        marker.points.extend([points[0], points[1], points[2]])
+        marker.points.extend([points[0], points[2], points[3]])
 
-            orientation = None
+        marker.scale.x = 1.0
+        marker.scale.y = 1.0
+        marker.scale.z = 1.0
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.5
+        marker.color.a = 0.4
 
-            for marker_id in sorted(ground_truth.keys()):
-                data = ground_truth[marker_id]
-                position = data["position"]
-                x, y, z = position.x, position.y, position.z
+        self.marker_pub.publish(marker)
 
-                print(f"Marker ID: {marker_id}", "position: ", position)
-                all_poses.append([x, y, z])
-
-            # all_poses is ordered by marker_id
-            pos, ori = pose_from_points(all_poses)
-
-            pos = Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2]))
-            ori = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
-
-            #Fill PoseStamped
-            pose_in = PoseStamped()
-            pose_in.header.stamp = Time(seconds=0).to_msg()
-            pose_in.header.frame_id = 'camera_color_frame'
-
-            pose_in.pose.position.x = pos.x
-            pose_in.pose.position.y = pos.y
-            pose_in.pose.position.z = pos.z
-            pose_in.pose.orientation = ori
-            #
-            # try:
-            #     pose_out = self.tf_buffer.transform(
-            #         pose_in,
-            #         'eddie_base_link',
-            #         timeout=Duration(seconds=0.5)
-            #     )
-            # except TransformException as ex:
-            #     self.get_logger().warn(f'Could not transform Pose: {ex}')
-            #     return
-
-            self.publisher_centroid.publish(pose_in)
-
-            # Save the fixed transform
-            self.fixed_tf = TransformStamped()
-            self.fixed_tf.header.frame_id = 'eddie_base_link'
-            self.fixed_tf.child_frame_id = 'ground_truth_object'
-            self.fixed_tf.transform.translation.x = pose_in.pose.position.x
-            self.fixed_tf.transform.translation.y = pose_in.pose.position.y
-            self.fixed_tf.transform.translation.z = pose_in.pose.position.z
-            self.fixed_tf.transform.rotation = pose_in.pose.orientation
-
-            # Publish Plane Marker
-            # fixed_marker = Marker()
-            # fixed_marker.header.frame_id = "ground_truth_object"
-            # fixed_marker.header.stamp = self.get_clock().now().to_msg()
-            # fixed_marker.ns = "ground_truth_surface"
-            # fixed_marker.id = 0
-            # fixed_marker.type = Marker.TRIANGLE_LIST
-            # fixed_marker.action = Marker.ADD
-            # fixed_marker.pose.orientation.w = 1.0
-
-            # # Hardcoded object dimensions
-            # x_len = 0.6    #0.31  #0.34
-            # y_len = 0.34   #0.98  #0.6
-            #
-            # # Define rectangle corners
-            # p0 = Point(x=-x_len / 2, y=-y_len / 2, z=0.0)
-            # p1 = Point(x=x_len / 2, y=-y_len / 2, z=0.0)
-            # p2 = Point(x=x_len / 2, y=y_len / 2, z=0.0)
-            # p3 = Point(x=-x_len / 2, y=y_len / 2, z=0.0)
-            #
-            # poses = [p0, p1, p2, p3]
-
-            # poses = []
-            #
-            # for pose in all_poses:
-            #     poses.append(Point(x=pose[0], y=pose[1], z=pose[2]))
-
-            # for pose in poses:
-            #     self.publisher_point.publish(pose)
-
-            # Add rectangle as two triangles
-            # fixed_marker.points.extend([p0, p1, p2])
-            # fixed_marker.points.extend([p0, p2, p3])
-
-            # fixed_marker.points.extend([poses[0], poses[1], poses[2]])
-            # fixed_marker.points.extend([poses[0], poses[2], poses[3]])
-            #
-            # fixed_marker.scale.x = 1.0
-            # fixed_marker.scale.y = 1.0
-            # fixed_marker.scale.z = 1.0
-            #
-            # fixed_marker.color.r = 1.0
-            # fixed_marker.color.g = 0.0
-            # fixed_marker.color.b = 0.5
-            # fixed_marker.color.a = 0.4
-
-            self.ground_truth_computed = True
-
-
-        if self.fixed_tf:
-            self.fixed_tf.header.stamp = self.get_clock().now().to_msg()
-            self.br.sendTransform(self.fixed_tf)
-            # fixed_marker.header.stamp = self.get_clock().now().to_msg()
-            # self.publisher.publish(fixed_marker)
-
-
-
-    def send_transform(self):
-
-        global poses, tf_poses
-
-        t = geometry_msgs.msg.TransformStamped()
-
-        t.header.stamp = self.get_clock().now().to_msg()
-
-        t.header.frame_id = 'map'
-        t.child_frame_id = 'eddie_base_link'
-
-        t.transform.translation.x = 2.0
-        t.transform.translation.y = 2.28
-        t.transform.translation.z = 0.8
-
-        quat = euler_to_quaternion(0, 0, 0)
-        t.transform.rotation.y = quat[1]
-        t.transform.rotation.z = quat[2]
-        t.transform.rotation.w = quat[3]
-
-        self.br.sendTransform(t)
-
-        t = geometry_msgs.msg.TransformStamped()
-
-        t.header.stamp = self.get_clock().now().to_msg()
-
-        t.header.frame_id = 'end_effector'
-        t.child_frame_id = 'camera_color_frame'
-
-        t.transform.translation.x = 0.0
-        t.transform.translation.y = 0.05639
-        t.transform.translation.z = -0.00305
-
-        quat = euler_to_quaternion(math.pi, math.pi, 0)
-        t.transform.rotation.y = quat[1]
-        t.transform.rotation.z = quat[2]
-        t.transform.rotation.w = quat[3]
-
-        self.br.sendTransform(t)
-
-        if self.fixed_tf and len(poses) >= 4:
-
-            # out = []
-            #
-            # for i, point_msg in enumerate(poses):
-            #     point_in = PointStamped()
-            #     point_in.header.stamp = Time(seconds=0).to_msg()
-            #     point_in.header.frame_id = 'camera_color_frame'
-            #
-            #     point_in.point.x = point_msg.x
-            #     point_in.point.y = point_msg.y
-            #     point_in.point.z = point_msg.z
-            #
-            #     try:
-            #         point_out = self.tf_buffer.transform(
-            #             point_in,
-            #             'eddie_base_link',
-            #             timeout=Duration(seconds=0.1)
-            #         )
-            #         out.append(point_out)
-            #
-            #     except TransformException as ex:
-            #         self.get_logger().warn(
-            #             f'Could not transform Point'
-            #         )
-            #         break
-            #
-            # list_out = []
-            # for stamped_point in out:
-            #     point = stamped_point.point
-            #     x = float(point.x)  #
-            #     y = float(point.y)
-            #     z = float(point.z)
-            #     list_out.append([x, y, z])
-            #
-            # tf_poses = list_out
-            # print(tf_poses)
-
-
-                    # Publish Plane Marker
-            fixed_marker = Marker()
-            fixed_marker.header.frame_id = "eddie_base_link"
-            fixed_marker.header.stamp = self.get_clock().now().to_msg()
-            fixed_marker.ns = "ground_truth_surface"
-            fixed_marker.id = 0
-            fixed_marker.type = Marker.TRIANGLE_LIST
-            fixed_marker.action = Marker.ADD
-            fixed_marker.pose.orientation.w = 1.0
-
-            publish_poses = []
-
-            for pose in poses:
-                publish_poses.append(Point(x=pose.x, y=pose.y, z=pose.z))
-                self.publisher_point.publish(Point(x=pose.x, y=pose.y, z=pose.z))
-
-
-            fixed_marker.points.extend([publish_poses[0], publish_poses[1], publish_poses[2]])
-            fixed_marker.points.extend([publish_poses[0], publish_poses[2], publish_poses[3]])
-
-            fixed_marker.scale.x = 1.0
-            fixed_marker.scale.y = 1.0
-            fixed_marker.scale.z = 1.0
-
-            fixed_marker.color.r = 1.0
-            fixed_marker.color.g = 0.0
-            fixed_marker.color.b = 0.5
-            fixed_marker.color.a = 0.4
-
-
-            fixed_marker.header.stamp = self.get_clock().now().to_msg()
-            self.publisher.publish(fixed_marker)
-
-
+    def ordered_ground_truth_points(self) -> List[Point]:
+        if self.mode_of_computation == ModeOfComputation.MARKERS_FOR_POSE_GIVEN_DIMENSIONS:
+            for i in range(self.n_surfaces):
+                if self.experiment_config == EXPERIMENT_CONFIG.SINGLE_RECT_SURFACE_FLAT:
+                    return [
+                        Point(
+                            x=self.fixed_ground_truth_tf.transform.translation.x + dx,
+                            y=self.fixed_ground_truth_tf.transform.translation.y + dy,
+                            z=self.fixed_ground_truth_tf.transform.translation.z
+                        )
+                        for dx, dy in [
+                            (-self.length / 2, -self.width / 2),
+                            (self.length / 2, -self.width / 2),
+                            (self.length / 2, self.width / 2),
+                            (-self.length / 2, self.width / 2),
+                        ]
+                    ]
+                
+                elif self.experiment_config == EXPERIMENT_CONFIG.SINGLE_RECT_SURFACE_WITH_SLOPE:
+                    # ground truth is always in base_link. 
+                    slope_radians = math.radians(self.slope_angle_degrees)
+                    dz = math.tan(slope_radians) * self.length
+                    return [
+                        Point(
+                            x=self.fixed_ground_truth_tf.transform.translation.x + dx,
+                            y=self.fixed_ground_truth_tf.transform.translation.y + dy,
+                            z=self.fixed_ground_truth_tf.transform.translation.z + (dz if dx > 0 else 0.0)
+                        )
+                        for dx, dy in [
+                            (-self.length / 2, -self.width / 2),
+                            (self.length / 2, -self.width / 2),
+                            (self.length / 2, self.width / 2),
+                            (-self.length / 2, self.width / 2),
+                        ]
+                    ]
+                    
+        elif self.mode_of_computation == ModeOfComputation.MARKERS_FOR_POSE_AND_DIMENSIONS:
+            return [
+                Point(
+                    x=observation.position.x,
+                    y=observation.position.y,
+                    z=observation.position.z,
+                )
+                for _, observation in sorted(self.ground_truth.items(), key=lambda item: item[0])
+            ]
 
 
 def main(args=None):
     rclpy.init(args=args)
-
-    # Create the marker publisher node
-    gt_publisher = GT_VisualizerNode()
-
-    # Spin the node to keep it alive and publishing
-    rclpy.spin(gt_publisher)
-
-    # Clean up on shutdown
-    gt_publisher.destroy_node()
-    rclpy.shutdown()
+    node = GT_VisualizerNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
