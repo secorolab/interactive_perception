@@ -66,13 +66,25 @@ def line_intersection(p1: Tuple[float, float],
     :param m2: Slope of line 2
     :return: Intersection point or None if lines are parallel
     """
-    if m1 == m2:
+    if not (np.isfinite(m1) and np.isfinite(m2)):
+        if np.isinf(m1) and np.isinf(m2):
+            return None
+        if np.isinf(m1):
+            xi = p1[0]
+            yi = m2 * (xi - p2[0]) + p2[1]
+            return (xi, yi) if np.isfinite(xi) and np.isfinite(yi) else None
+        if np.isinf(m2):
+            xi = p2[0]
+            yi = m1 * (xi - p1[0]) + p1[1]
+            return (xi, yi) if np.isfinite(xi) and np.isfinite(yi) else None
+
+    if np.isclose(m1, m2):
         return None
     x1, y1 = p1
     x2, y2 = p2
     xi = ((m1*x1 - y1) - (m2*x2 - y2)) / (m1 - m2)
     yi = m1*(xi - x1) + y1
-    return (xi, yi)
+    return (xi, yi) if np.isfinite(xi) and np.isfinite(yi) else None
 
 
 def find_dof(know: PolygonKnowledge) -> int:
@@ -371,31 +383,32 @@ def are_adjacent(index1: int, index2: int, num_sides: int):
 
 def are_adjacent_and_action_in_order(prev_action_spec: ActionSpec, 
                                      target_edge, 
-                                     prev_action_edge_idx, 
+                                     prev_action_ref_edge_idx, 
                                      num_sides):
     """
-    Check whether two indices are adjacent in a circular structure. CCK or CK direction of previous action determines the expected order of adjacency.
+    Check whether two indices are adjacent in a circular structure. 
+    CCK or CK direction of previous action determines the expected order of adjacency.
 
     :param prev_action_spec: previous action specification
     :param target_edge: target edge index
-    :param prev_action_edge_idx: edge index used as reference in previous action
+    :param prev_action_ref_edge_idx: edge index used as reference in previous action
     :param num_sides: Total number of sides (length of the circular structure).
     :return: True if the indices are adjacent and the previous action was directed towards the target_edge, False otherwise.
     """
     prev_edge_idx_of_best_edge_idx = (target_edge - 1) % num_sides
     next_edge_idx_of_best_edge_idx = (target_edge + 1) % num_sides
 
-    edges_are_adjacent = are_adjacent(target_edge, prev_action_edge_idx, num_sides)
+    edges_are_adjacent = are_adjacent(target_edge, prev_action_ref_edge_idx, num_sides)
     prev_action_towards_target_edge = True
 
-    if prev_action_edge_idx == prev_edge_idx_of_best_edge_idx:
+    if prev_action_ref_edge_idx == prev_edge_idx_of_best_edge_idx:
         if ((prev_action_spec.mode == Mode.PARALLEL_OVER_SURFACE_FROM_OUTSIDE or
              prev_action_spec.mode == Mode.PARALLEL_IN_FREE_SPACE_FROM_OUTSIDE) and 
              prev_action_spec.direction == Direction.CCK):
              prev_action_towards_target_edge = False
         elif prev_action_spec.direction == Direction.CK:
             prev_action_towards_target_edge = False
-    if prev_action_edge_idx == next_edge_idx_of_best_edge_idx:
+    if prev_action_ref_edge_idx == next_edge_idx_of_best_edge_idx:
         if ((prev_action_spec.mode == Mode.PARALLEL_OVER_SURFACE_FROM_OUTSIDE or
              prev_action_spec.mode == Mode.PARALLEL_IN_FREE_SPACE_FROM_OUTSIDE) and 
              prev_action_spec.direction == Direction.CK):

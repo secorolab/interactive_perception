@@ -33,7 +33,107 @@ class OrientationInput(Enum):
 
 ## helper functions
 
-def resample_line_points(points, spacing=0.01):
+def _fit_line_ransac_2d(points,
+                        distance_threshold=0.0015,
+                        fallback_threshold_distance=0.003,
+                        min_inlier_ratio=0.7,
+                        max_itr=500,
+                        sample_middle_fraction=0.6):
+    pts = np.asarray(points, dtype=float)[:, :2]
+
+    if pts.shape[0] < 2:
+        raise ValueError("Need at least 2 points")
+
+    def pca_direction(points_2d):
+        mean = points_2d.mean(axis=0)
+        centered = points_2d - mean
+        cov = centered.T @ centered / (len(points_2d) - 1)
+
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        if eigvals.max() < 1e-9:
+            raise RuntimeError("Points have near-zero spread")
+
+        direction = eigvecs[:, np.argmax(eigvals)]
+        direction /= np.linalg.norm(direction)
+
+        return direction, mean
+
+    def orient_direction(direction):
+        motion_direction = pts[-1] - pts[0]
+        if np.dot(direction, motion_direction) < 0:
+            direction = -direction
+        return direction
+
+    n = len(pts)
+    sample_middle_fraction = min(max(sample_middle_fraction, 0.0), 1.0)
+    margin = (1.0 - sample_middle_fraction) * 0.5
+    sample_start_idx = int(margin * n)
+    sample_end_idx = int((1.0 - margin) * n)
+    sample_indices = np.arange(sample_start_idx, sample_end_idx)
+
+    if len(sample_indices) < 2:
+        sample_indices = np.arange(n)
+
+    def inlier_mask_for_line(line_point, line_dir, threshold):
+        centered = pts - line_point
+        projections = centered @ line_dir
+        closest_points = line_point + np.outer(projections, line_dir)
+        distances = np.linalg.norm(pts - closest_points, axis=1)
+        return distances <= threshold
+
+    best_inlier_mask = None
+    best_inlier_count = 0
+    best_line_point = None
+    best_line_dir = None
+
+    for _ in range(max_itr):
+        i, j = np.random.choice(sample_indices, size=2, replace=False)
+
+        p1 = pts[i]
+        p2 = pts[j]
+
+        line_vec = p2 - p1
+        line_norm = np.linalg.norm(line_vec)
+
+        if line_norm < 1e-9:
+            continue
+
+        line_dir = line_vec / line_norm
+        inlier_mask = inlier_mask_for_line(p1, line_dir, distance_threshold)
+        inlier_count = np.sum(inlier_mask)
+
+        if inlier_count > best_inlier_count:
+            best_inlier_count = inlier_count
+            best_inlier_mask = inlier_mask
+            best_line_point = p1
+            best_line_dir = line_dir
+
+    if best_inlier_mask is None:
+        inlier_pts = pts
+    elif best_inlier_count / n < min_inlier_ratio:
+        fallback_inlier_mask = inlier_mask_for_line(
+            best_line_point,
+            best_line_dir,
+            fallback_threshold_distance
+        )
+        fallback_inlier_pts = pts[fallback_inlier_mask]
+        inlier_pts = fallback_inlier_pts if len(fallback_inlier_pts) >= 2 else pts
+    else:
+        inlier_pts = pts[best_inlier_mask]
+
+    direction, mean = pca_direction(inlier_pts)
+    direction = orient_direction(direction)
+
+    return direction, mean, inlier_pts
+
+
+def resample_line_points(points,
+                         spacing=0.01,
+                         distance_threshold=0.0015,
+                         fallback_threshold_distance=0.003,
+                         min_inlier_ratio=0.7,
+                         max_itr=500,
+                         sample_middle_fraction=0.6):
     """
     Given noisy 2D points roughly along a line, return evenly spaced points.
 
@@ -43,29 +143,16 @@ def resample_line_points(points, spacing=0.01):
     returns: (M,2) numpy array of resampled points
     """
     
-    pts = np.asarray(points, dtype=float)
+    direction, mean, inlier_pts = _fit_line_ransac_2d(
+        points,
+        distance_threshold=distance_threshold,
+        fallback_threshold_distance=fallback_threshold_distance,
+        min_inlier_ratio=min_inlier_ratio,
+        max_itr=max_itr,
+        sample_middle_fraction=sample_middle_fraction
+    )
 
-    if len(pts) < 2:
-        raise ValueError("Need at least 2 points")
-
-    mean = pts.mean(axis=0)
-    centered = pts - mean
-
-    cov = centered.T @ centered / (len(pts) - 1)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-
-    if eigvals.max() < 1e-6:
-        raise RuntimeError("Points have near-zero spread")
-
-    direction = eigvecs[:, np.argmax(eigvals)]
-    direction /= np.linalg.norm(direction)
-    
-    initial_direction = pts[-1] - pts[0]
-
-    if np.dot(direction, initial_direction) < 0:
-        direction = -direction
-
-    t = centered @ direction
+    t = (inlier_pts - mean) @ direction
     t_sorted = np.sort(t)
 
     t_min, t_max = t_sorted[0], t_sorted[-1]
@@ -78,40 +165,32 @@ def resample_line_points(points, spacing=0.01):
 
     return mean + np.outer(t_resampled, direction)
 
-def unit_vector_from_points_2d(points):
+def unit_vector_from_points_2d(points,
+                               distance_threshold=0.0015,
+                               fallback_threshold_distance=0.003,
+                               min_inlier_ratio=0.7,
+                               max_itr=500,
+                               sample_middle_fraction=0.6) -> Tuple[float, float]:
     """
-    Estimate a unit direction vector from noisy 2D points using PCA.
+    Estimate a unit direction vector from noisy 2D points using ransac.
 
     :param points: array-like of shape (N, 2)
+    :param distance_threshold: max distance for a point to be considered an inlier
+    :param fallback_threshold_distance: if ransac fails, use this distance to determine inliers for a final PCA fit
+    :param min_inlier_ratio: minimum ratio of inliers to total points for a successful ransac fit
+    :param max_itr: maximum number of iterations for ransac
+    :param sample_middle_fraction: fraction of ordered points to sample RANSAC pairs from, centered around the median index
     :return: unit vector (vx, vy)
     """
-    pts = np.asarray(points, dtype=float)
+    direction, _, _ = _fit_line_ransac_2d(
+        points,
+        distance_threshold=distance_threshold,
+        fallback_threshold_distance=fallback_threshold_distance,
+        min_inlier_ratio=min_inlier_ratio,
+        max_itr=max_itr,
+        sample_middle_fraction=sample_middle_fraction
+    )
 
-    if pts.shape[0] < 2:
-        raise ValueError("Need at least 2 points")
-
-    # center the data (remove translation)
-    mean = pts.mean(axis=0)
-    centered = pts - mean
-
-    # covariance matrix
-    cov = np.dot(centered.T, centered) / (len(pts) - 1)
-
-    # Eigen decomposition
-    eigvals, eigvecs = np.linalg.eigh(cov)
-
-    # take eigenvector with largest eigenvalue
-    direction = eigvecs[:, np.argmax(eigvals)]
-
-    # normalize
-    direction /= np.linalg.norm(direction)
-    
-    # orient according to first -> last point
-    initial_direction = pts[-1] - pts[0]
-
-    if np.dot(direction, initial_direction) < 0:
-        direction = -direction
-    
     return direction[0:2]
 
 def transform_points_local_to_global(points,
@@ -624,7 +703,15 @@ def make_action_goal_touch(velocity, orientation, action_name="touch_neutral", f
 
     return str(current_template)
 
-def make_action_goal_slide(position=[None, None, None], velocity=[None, None, None], force=[None, None, None], orientation=None, action_name="slide_to_explore_plane", frame_name="eddie_base_link", time=1.5):
+def make_action_goal_slide(position=[None, None, None],
+                           velocity=[None, None, None],
+                           force=[None, None, None],
+                           orientation=None,
+                           max_distance=0.15, # in meters
+                           action_name="slide_to_explore_plane",
+                           frame_name="eddie_base_link", 
+                           time=1.5
+                        ):
     """
     position is the id of constraint to be updated
     """
@@ -639,11 +726,12 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
     
     force = [float(f) if f is not None else None for f in force]
     force_opr_list = [eq if f is not None else None for f in force]
+    max_distance = float(max_distance)
 
     force_magnitude = np.linalg.norm([f for f in force if f is not None])
     unit_vector_of_force = [(f / force_magnitude) if (f is not None and force_magnitude > 0) else None
                             for f in force]
-    velocity_spike_threshold = 0.06
+    velocity_spike_threshold = 0.045
     velocity_spike_threshold_vector = [float(velocity_spike_threshold * uv) if uv is not None else None for uv in unit_vector_of_force]
     velocity_spike_opr_list = [
         gt if uv is not None and uv > 0
@@ -779,7 +867,7 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
                 "disjunction_id": 2,
                 "position": 5,
                 "type": "VELOCITY_XYZ",
-                "value": [None, None, -0.015],
+                "value": [None, None, -0.01],
                 "operator": [None, None, lt]
             })
         current_template = edit_condition(current_template, {
@@ -793,7 +881,7 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
 
     elif action_name == "slide_against_edge_until_corner":
         """
-        disjunction 1 (against edge)    : reflexive corner
+        disjunction 1 (against edge)    : reflexive corner or next edge might have 90 degree dihedral
         disjunction 2 (against edge)    : non-reflexive corner
         """
         
@@ -843,7 +931,7 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
                 "disjunction_id": 2,
                 "position": 5,
                 "type": "VELOCITY_XYZ",
-                "value": [velocity_spike_threshold_vector[0], velocity_spike_threshold_vector[1], None],
+                "value": [velocity_spike_threshold_vector[0], velocity_spike_threshold_vector[1], velocity_spike_threshold_vector[2]],
                 "operator": velocity_spike_opr_list
             })
         # current_template = edit_condition(current_template, {
@@ -868,6 +956,98 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
         disjunction 1 (against vertical surface)  : slide until edge where dihedral angle=90; non-reflexive corner;
         disjunction 2 (against vertical surface)  : slide until edge where dihedral angle=270; non-reflexive corner;
         disjunction 3 (against vertical surface)  : slide until edge where reflexive corner;
+        """
+        
+        zero_vel_threshold = 0.001
+        zero_vel_ul = zero_vel_threshold
+        zero_vel_ll = -zero_vel_threshold
+        
+        # disjunction 1
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "number_of_disjunctions": 3,
+                "constraint_count": 9,
+                "disjunction_id": 1,
+                "position": 1,
+                "type": "VELOCITY_XYZ",
+                "value": [zero_vel_ul, zero_vel_ul, zero_vel_ul],
+                "operator": [lt, lt, lt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 1,
+                "position": 2,
+                "type": "VELOCITY_XYZ",
+                "value": [zero_vel_ll, zero_vel_ll, zero_vel_ll],
+                "operator": [gt, gt, gt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 1,
+                "position": 3,
+                "type": "POSITION_XYZ",
+                "value": [None, None, -0.01],
+                "operator": [None, None, gt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 1,
+                "position": 4,
+                "type": "TIME_LIMIT",
+                "value": 2.0,
+                "operator": gt
+            })
+
+        # disjunction 2
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 2,
+                "position": 5,
+                "type": "VELOCITY_XYZ",
+                "value": [None, None, -0.01],
+                "operator": [None, None, lt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 2,
+                "position": 6,
+                "type": "POSITION_XYZ",
+                "value": [None, None, -0.01],
+                "operator": [None, None, lt]
+            })
+        
+        # disjunction 3
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 3,
+                "position": 7,
+                "type": "VELOCITY_XYZ",
+                "value": [None, velocity_spike_threshold_vector[1], None],
+                "operator": [None, lt, None]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 3,
+                "position": 8,
+                "type": "POSITION_XYZ",
+                "value": [None, None, -0.01],
+                "operator": [None, None, gt]
+            })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 3,
+                "position": 9,
+                "type": "TIME_LIMIT",
+                "value": 2.0,
+                "operator": gt
+            })
+        
+    elif action_name == "slide_parallel_to_edge_within_range":
+        """
+        disjunction 1: slide until contact with a surface where dihedral angle=90
+        disjunction 2: slide until contact with a surface where dihedral angle=270
+        disjunction 3: slide until certain distance is reached when there is no edge available
+        Note: this action is not used when reflexivity is unknown;
         """
         
         zero_vel_threshold = 0.001
@@ -916,7 +1096,7 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
                 "disjunction_id": 2,
                 "position": 5,
                 "type": "VELOCITY_XYZ",
-                "value": [None, None, -0.015],
+                "value": [None, None, -0.01],
                 "operator": [None, None, lt]
             })
         current_template = edit_condition(current_template, {
@@ -924,7 +1104,7 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
                 "disjunction_id": 2,
                 "position": 6,
                 "type": "POSITION_XYZ",
-                "value": [None, None, -0.01],
+                "value": [None, None, -0.015],
                 "operator": [None, None, lt]
             })
         
@@ -933,9 +1113,9 @@ def make_action_goal_slide(position=[None, None, None], velocity=[None, None, No
                 "condition_type": "POST_CONDITION",
                 "disjunction_id": 3,
                 "position": 7,
-                "type": "VELOCITY_XYZ",
-                "value": [velocity_spike_threshold_vector[0], velocity_spike_threshold_vector[1], None],
-                "operator": [gt, gt, None]
+                "type": "MAX_DISTANCE_TRAVERSED",
+                "value": max_distance,
+                "operator": gt
             })
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",

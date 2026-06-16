@@ -12,6 +12,8 @@ from typing import Literal
 import json
 import ast
 import traceback
+from datetime import datetime
+from scipy.spatial.transform import Rotation as R
 
 # ROS 2 imports
 from rclpy.node import Node as ROSNode
@@ -55,7 +57,9 @@ class PolygonKnowledgeToGraphConverter:
     @staticmethod
     def polygon_knw_to_json(pk: PolygonKnowledge, 
                       frame_name: str = "plane_frame_0",
-                      polygon_id: str = "polygon_0") -> dict:
+                      polygon_id: str = "polygon_0",
+                      ref_frame_pose: Optional[dict] = None,
+                      noisy_points_on_edge: Optional[List[List[Tuple[float, float]]]] = None) -> dict:
         """
         Convert PolygonKnowledge to Graph JSON format suitable for create_graph_from_json().
         
@@ -67,6 +71,8 @@ class PolygonKnowledgeToGraphConverter:
         :param pk: PolygonKnowledge instance
         :param frame_name: Reference frame name
         :param polygon_id: ID for the polygon node
+        :param ref_frame_pose: Optional estimated pose for the reference frame
+        :param noisy_points_on_edge: Optional raw/noisy edge samples for visualization
 
         :return: JSON-compatible dict with frame, nodes, data_structure, and edges
         """
@@ -74,6 +80,18 @@ class PolygonKnowledgeToGraphConverter:
         nodes = []
         data_structure = []
         edges = []
+
+        def points_to_xyz_list(points):
+            points_list = []
+            if points is not None:
+                for point in points:
+                    if len(point) == 2:
+                        points_list.append([float(point[0]), float(point[1]), 0.0])
+                    elif len(point) == 3:
+                        points_list.append([float(point[0]), float(point[1]), float(point[2])])
+                    else:
+                        points_list.append([float(value) for value in point])
+            return points_list
         
         # ========== CREATE CORNER NODES AND DATA ==========
         for i in range(n_sides):
@@ -176,6 +194,43 @@ class PolygonKnowledgeToGraphConverter:
                 "id": f"dihedral_angle_{i}_deg", "type": "float", "value": dihedral_val
             })
         
+        # ========== CREATE EXPLORATORY DATA NODES (INTERNAL POINTS ON EDGES) ==========
+        for i in range(n_sides):
+            # Node definition for internal points on edge
+            nodes.append({
+                "id": f"internal_points_on_edge_{i}",
+                "type": "exploratory_points",
+                "segment": f"line_segment_{i}",
+                "points_data_id": f"internal_points_on_edge_{i}_data"
+            })
+            
+            # Create data entry for internal points on edge
+            # Store as list of [x, y, z] coordinates
+            points_list = points_to_xyz_list(pk.internal_points_on_edge[i])
+            
+            data_structure.append({
+                "id": f"internal_points_on_edge_{i}_data",
+                "type": "points_array",
+                "value": points_list
+            })
+
+            nodes.append({
+                "id": f"noisy_points_on_edge_{i}",
+                "type": "noisy_exploratory_points",
+                "segment": f"line_segment_{i}",
+                "points_data_id": f"noisy_points_on_edge_{i}_data"
+            })
+
+            noisy_points = []
+            if noisy_points_on_edge is not None and i < len(noisy_points_on_edge):
+                noisy_points = noisy_points_on_edge[i]
+
+            data_structure.append({
+                "id": f"noisy_points_on_edge_{i}_data",
+                "type": "points_array",
+                "value": points_to_xyz_list(noisy_points)
+            })
+        
         # ========== CREATE EDGES ==========
         # Polygon to segment edges
         for i in range(n_sides):
@@ -199,7 +254,12 @@ class PolygonKnowledgeToGraphConverter:
         for i in range(n_sides):
             edges.append([f"dihedral_angle_{i}", f"line_segment_{i}"])
         
-        return {
+        # Exploratory data connections
+        for i in range(n_sides):
+            edges.append([f"internal_points_on_edge_{i}", f"line_segment_{i}"])
+            edges.append([f"noisy_points_on_edge_{i}", f"line_segment_{i}"])
+        
+        graph_json = {
             "frame": {
                 "name": frame_name
             },
@@ -207,6 +267,10 @@ class PolygonKnowledgeToGraphConverter:
             "data_structure": data_structure,
             "edges": edges
         }
+        if ref_frame_pose is not None:
+            graph_json["ref_frame_pose"] = ref_frame_pose
+
+        return graph_json
 
     @staticmethod
     def polygon_knw_to_graph(graph: nx.Graph, pk: PolygonKnowledge) -> None:
@@ -303,6 +367,9 @@ class ReasonerNode(ROSNode):
         self.corner_coordinates_available_in_rpk = False
         self.rpk_rck_matching_idx_found = False
         self.rck_rearranged = False
+        self.execution_start_time = datetime.now().astimezone()
+        self.execution_end_time = None
+        self.final_rck_saved = False
         self.dof = None
         self.stop_execution = False
         self.last_motion_progress_log_time = 0.0
@@ -346,6 +413,7 @@ class ReasonerNode(ROSNode):
         
         # ====== State Variables ======
         self.state_of_execution = Util.StateOfExecution.IDLE
+        self.ee_pose_frame_id = None
         self.current_position = [0.0, 0.0, 0.0]
         self.current_orientation = [0.0, 0.0, 0.0, 1.0]
         self.first_state_update_received = False
@@ -369,6 +437,8 @@ class ReasonerNode(ROSNode):
         self.dir_of_sliding_motion_2d = None
         self.distance_threshold_for_motion_detection = self.config['motion']['distance_threshold_for_motion_detection']
         self.sliding_variables_initialized = False
+        self.reorient_while_sliding_against_edge = False
+        self.contact_established_with_vertical_surface = False
         self.action_name_str = None
         self.current_marker_frame_name = None
         self.current_edge_of_interest_origin = None
@@ -395,6 +465,7 @@ class ReasonerNode(ROSNode):
         self.collected_points = []
         self.points_on_plane = []
         self.points_on_edge = []
+        self.noisy_points_on_edge = [[] for _ in range(self.n_sides)]
         self.current_action_type = None
         
         # ====== Logging Setup ======
@@ -403,15 +474,20 @@ class ReasonerNode(ROSNode):
         self.rck_json_path = os.path.join(self.logs_dir, 'rck_knowledge.json')
         self.rck_history_dir = os.path.join(self.logs_dir, 'rck_history')
         os.makedirs(self.rck_history_dir, exist_ok=True)
+        logging_config = self.config.get('logging', {})
+        self.rck_save_mode = logging_config.get('rck_save_mode', 'final_only')
+        if self.rck_save_mode not in {'final_only', 'on_update'}:
+            self.get_logger().warn(
+                f"Unknown rck_save_mode '{self.rck_save_mode}'. Using 'final_only'."
+            )
+            self.rck_save_mode = 'final_only'
+        self.rck_snapshot_count = 0
         
         # ====== Initialization ======
         
         # Sync rck with graph
         self._sync_knowledge_to_graph()
-        
-        # Save initial rck state
-        self._save_rck_to_json()
-        
+
         # Start main loop
         self.create_timer(0.001, self.main_loop)
         self.get_logger().info("Reasoner Node initialized with PolygonKnowledge framework")
@@ -475,35 +551,105 @@ class ReasonerNode(ROSNode):
             Graph.render_graph_visualization(self.rck_graph)
         # since rpk is static, it is not updated here
     
-    def _save_rck_to_json(self):
+    def _save_rck_to_json(self, snapshot_label: str, mark_final: bool = False):
         """
-        Save current knowledge (rck) to JSON file in logs directory.
-        Creates both:
-        1. A main file (rck_knowledge.json) that keeps getting updated
-        2. Timestamped backup files in rck_history directory for tracking evolution
+        Save current knowledge (rck) to the latest JSON path and timestamped history.
         """
+        if mark_final and self.final_rck_saved:
+            return
+
         try:
+            snapshot_time = datetime.now().astimezone()
+            if mark_final:
+                self.execution_end_time = snapshot_time
+
             # Generate JSON from current rck
             rck_json = PolygonKnowledgeToGraphConverter.polygon_knw_to_json(
                 self.rck, 
                 frame_name="robot_frame_0",
-                polygon_id="polygon_0"
+                polygon_id="polygon_0",
+                ref_frame_pose=self._ref_frame_pose_to_json(),
+                noisy_points_on_edge=self.noisy_points_on_edge
             )
-            
-            # Save main file (always updated)
+
+            duration_seconds = (
+                snapshot_time - self.execution_start_time
+            ).total_seconds()
+            rck_json["execution"] = {
+                "start_time": self.execution_start_time.isoformat(),
+                "snapshot_time": snapshot_time.isoformat(),
+                "end_time": self.execution_end_time.isoformat() if self.execution_end_time else None,
+                "duration_seconds": duration_seconds,
+                "step_count": self.step_count,
+                "dof": self.dof,
+                "current_action_type": self.current_action_type.name if self.current_action_type else None,
+                "current_ref_edge_index": self.current_ref_edge_index,
+                "snapshot_label": snapshot_label,
+                "rck_save_mode": self.rck_save_mode
+            }
+
+            self.rck_snapshot_count += 1
+            timestamp = snapshot_time.strftime("%Y%m%d_%H%M%S_%f")
+            history_file = os.path.join(
+                self.rck_history_dir,
+                f'rck_knowledge_{self.rck_snapshot_count:04d}_{snapshot_label}_{timestamp}.json'
+            )
+
             with open(self.rck_json_path, 'w') as f:
                 json.dump(rck_json, f, indent=4)
-            
-            # Save timestamped backup for history tracking
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            history_file = os.path.join(self.rck_history_dir, f'rck_knowledge_{timestamp}.json')
             with open(history_file, 'w') as f:
                 json.dump(rck_json, f, indent=4)
-            
-            self.get_logger().debug(f"Saved rck to {self.rck_json_path}")
+
+            if mark_final:
+                self.final_rck_saved = True
+            self.get_logger().info(f"Saved rck snapshot to {history_file}")
         except Exception as e:
             self.get_logger().warn(f"Error saving rck to JSON: {e}")
+
+    def _save_final_rck_to_json(self):
+        """
+        Save final current knowledge (rck) once at the end of execution.
+        """
+        self._save_rck_to_json(snapshot_label='final', mark_final=True)
+
+    def _save_rck_snapshot_if_configured(self, snapshot_label: str):
+        """
+        Save an intermediate RCK snapshot when configured to log after updates.
+        """
+        if self.rck_save_mode == 'on_update':
+            self._save_rck_to_json(snapshot_label=snapshot_label)
+
+    def _ref_frame_pose_to_json(self):
+        """
+        Serialize the estimated plane/reference frame pose into JSON-safe values.
+        """
+        if self.plane_origin_position is None or self.plane_orientation is None:
+            return None
+
+        position = [float(value) for value in self.plane_origin_position]
+        quaternion = [float(value) for value in self.plane_orientation]
+
+        return {
+            "description": "Estimated plane/reference frame pose in eddie_base_link",
+            "frame_id": "eddie_base_link",
+            "child_frame_id": "robot_frame_0",
+            "position": {
+                "x": position[0],
+                "y": position[1],
+                "z": position[2],
+                "array": position
+            },
+            "orientation": {
+                "quaternion": {
+                    "x": quaternion[0],
+                    "y": quaternion[1],
+                    "z": quaternion[2],
+                    "w": quaternion[3],
+                    "array": quaternion
+                }
+            },
+            "source": "slide_to_explore_plane"
+        }
         
     def handle_sliding_against_unknown_surface(self):
         """
@@ -523,6 +669,8 @@ class ReasonerNode(ROSNode):
             self.dir_of_sliding_motion_2d = None
             self.sliding_variables_initialized = True
             self.collect_points_on_edge_bool = True
+            self.reorient_while_sliding_against_edge = False
+            self.contact_established_with_vertical_surface = False
         
         # distance traversed check
         if not self.sliding_motion_detected:
@@ -537,7 +685,7 @@ class ReasonerNode(ROSNode):
             # on detection of first sliding motion
             if distance_traversed_2d > self.distance_threshold_for_motion_detection:
                 self.sliding_motion_detected = True
-                self.dir_of_sliding_motion_2d = Util.unit_vector_from_points_2d(self.points_on_edge)
+                self.dir_of_sliding_motion_2d = Util.unit_vector_from_points_2d(points=self.points_on_edge)
                 if self.debug_log: print(f"Direction of sliding motion (2D): {self.dir_of_sliding_motion_2d}")
 
                 angle_with_direction_of_force = Util.get_ccw_angle(self.dir_of_sliding_motion_2d, self.last_direction_of_motion[0:2])
@@ -600,7 +748,7 @@ class ReasonerNode(ROSNode):
                 raise ValueError(f"Unhandled mode: {self.current_action_spec.mode}")
             
             if self.current_action_spec.mode == Mode.AGAINST_VERTICAL:
-                force_in_z_direction = self.force_against_surface
+                force_in_z_direction = -self.force_against_surface
                 position_in_z_direction = None
             else:
                 force_in_z_direction = None
@@ -659,60 +807,125 @@ class ReasonerNode(ROSNode):
                 dir_of_force = (-self.dir_of_sliding_motion_2d[1], self.dir_of_sliding_motion_2d[0]) # 90 degree rotation in the frame of base_link
                 
                 if self.current_action_spec.direction == Direction.CCK:
-                    self.desired_orientation, _ = Util.resolve_orientation(dir_of_motion=[1.0, 0.0], orientation_input=Util.OrientationInput.RIGHT_OF_DIR_MOTION)
-                    ms_to_execute = Util.make_action_goal_slide(
-                        position=[None, None, -self.offset_below_surface],
-                        velocity=[self.slide_velocity, None, None],
-                        force=[None, self.force_against_surface, None],
-                        orientation=self.desired_orientation,
-                        action_name=self.action_name_str,
-                        frame_name=self.current_marker_frame_name,
-                        time=3.0
-                    )
-                    self.last_direction_of_motion = [self.dir_of_sliding_motion_2d[0], self.dir_of_sliding_motion_2d[1], 0.0]
-                    self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
+                    self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=[1.0, 0.0], orientation_input=Util.OrientationInput.RIGHT_OF_DIR_MOTION)
+                    
+                    if self.reorient_while_sliding_against_edge == False:
+                        self.collect_points_on_edge_bool = False
+                        self.reorient_while_sliding_against_edge = True
+                        # attain desired yaw
+                        ms_to_execute = Util.make_action_goal_yaw(
+                            position=[None, None, -self.offset_below_surface],
+                            yaw=desired_yaw,
+                            frame_name=self.current_marker_frame_name
+                        )
+                    else:
+                        self.collect_points_on_edge_bool = True
+                        ms_to_execute = Util.make_action_goal_slide(
+                            position=[None, None, -self.offset_below_surface],
+                            velocity=[self.slide_velocity, None, None],
+                            force=[None, self.force_against_surface, None],
+                            orientation=self.desired_orientation,
+                            action_name=self.action_name_str,
+                            frame_name=self.current_marker_frame_name,
+                            time=3.0
+                        )
+                        self.last_direction_of_motion = [self.dir_of_sliding_motion_2d[0], self.dir_of_sliding_motion_2d[1], 0.0]
+                        self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 elif self.current_action_spec.direction == Direction.CK:
-                    self.desired_orientation, _ = Util.resolve_orientation(dir_of_motion=[-1.0, 0.0], orientation_input=Util.OrientationInput.LEFT_OF_DIR_MOTION)
-                    ms_to_execute = Util.make_action_goal_slide(
-                        position=[None, None, -self.offset_below_surface],
-                        velocity=[self.slide_velocity, None, None],
-                        force=[None, self.force_against_surface, None],
-                        orientation=self.desired_orientation,
-                        action_name=self.action_name_str,
-                        frame_name=self.current_marker_frame_name,
-                        time=3.0
-                    )
-                    self.last_direction_of_motion = [-self.dir_of_sliding_motion_2d[0], -self.dir_of_sliding_motion_2d[1], 0.0]
-                    self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
+                    self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=[1.0, 0.0], orientation_input=Util.OrientationInput.LEFT_OF_DIR_MOTION)
+                    
+                    if self.reorient_while_sliding_against_edge == False:
+                        self.collect_points_on_edge_bool = False
+                        self.reorient_while_sliding_against_edge = True
+                        ms_to_execute = Util.make_action_goal_yaw(
+                            position=[None, None, -self.offset_below_surface],
+                            yaw=desired_yaw,
+                            frame_name=self.current_marker_frame_name
+                        )
+                    else:
+                        self.collect_points_on_edge_bool = True
+                        ms_to_execute = Util.make_action_goal_slide(
+                            position=[None, None, -self.offset_below_surface],
+                            velocity=[self.slide_velocity, None, None],
+                            force=[None, self.force_against_surface, None],
+                            orientation=self.desired_orientation,
+                            action_name=self.action_name_str,
+                            frame_name=self.current_marker_frame_name,
+                            time=3.0
+                        )
+                        self.last_direction_of_motion = [-self.dir_of_sliding_motion_2d[0], -self.dir_of_sliding_motion_2d[1], 0.0]
+                        self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 self.send_goal(ms_to_execute)
             
             elif self.current_action_spec.mode == Mode.AGAINST_VERTICAL:
                 dir_of_force = (self.dir_of_sliding_motion_2d[1], -self.dir_of_sliding_motion_2d[0]) # -90 degree rotation in the frame of base_link
                 
                 if self.current_action_spec.direction == Direction.CCK:
-                    self.desired_orientation, _ = Util.resolve_orientation(dir_of_motion=[1.0, 0.0], orientation_input=Util.OrientationInput.LEFT_OF_DIR_MOTION)
-                    ms_to_execute = Util.make_action_goal_slide(
-                        velocity=[self.slide_velocity, None, None],
-                        force=[None, -self.force_against_surface, None],
-                        orientation=self.desired_orientation,
-                        action_name=self.action_name_str,
-                        frame_name=self.current_marker_frame_name,
-                        time=3.0
-                    )
-                    self.last_direction_of_motion = [self.dir_of_sliding_motion_2d[0], self.dir_of_sliding_motion_2d[1], 0.0]
-                    self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
+                    self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=[1.0, 0.0], orientation_input=Util.OrientationInput.LEFT_OF_DIR_MOTION)
+                    
+                    if self.reorient_while_sliding_against_edge == False:
+                        self.collect_points_on_edge_bool = False
+                        self.reorient_while_sliding_against_edge = True
+                        ms_to_execute = Util.make_action_goal_yaw(
+                            position=[None, None, self.offset_below_surface],
+                            yaw=desired_yaw,
+                            frame_name=self.current_marker_frame_name
+                        )
+                        
+                    elif self.reorient_while_sliding_against_edge == True and self.contact_established_with_vertical_surface == False:
+                        self.contact_established_with_vertical_surface = True
+                        ms_to_execute = Util.make_action_goal_slide(
+                            velocity=[None, -self.slide_velocity, None],
+                            force=[None, None, -self.force_against_surface],
+                            orientation=self.desired_orientation,
+                            action_name="slide_until_edge",
+                            frame_name=self.current_marker_frame_name,
+                        )
+                    else:
+                        self.collect_points_on_edge_bool = True
+                        ms_to_execute = Util.make_action_goal_slide(
+                            velocity=[self.slide_velocity, None, None],
+                            force=[None, -self.force_against_surface/1.2, -self.force_against_surface/1.2],
+                            orientation=self.desired_orientation,
+                            action_name=self.action_name_str,
+                            frame_name=self.current_marker_frame_name,
+                            time=3.0
+                        )
+                        self.last_direction_of_motion = [self.dir_of_sliding_motion_2d[0], self.dir_of_sliding_motion_2d[1], 0.0]
+                        self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
+                        
                 elif self.current_action_spec.direction == Direction.CK:
-                    self.desired_orientation, _ = Util.resolve_orientation(dir_of_motion=[-1.0, 0.0], orientation_input=Util.OrientationInput.RIGHT_OF_DIR_MOTION)
-                    ms_to_execute = Util.make_action_goal_slide(
-                        velocity=[-self.slide_velocity, None, None],
-                        force=[None, -self.force_against_surface, None],
-                        orientation=self.desired_orientation,
-                        action_name=self.action_name_str,
-                        frame_name=self.current_marker_frame_name,
-                        time=3.0
-                    )
-                    self.last_direction_of_motion = [-self.dir_of_sliding_motion_2d[0], -self.dir_of_sliding_motion_2d[1], 0.0]
-                    self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
+                    self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=[-1.0, 0.0], orientation_input=Util.OrientationInput.RIGHT_OF_DIR_MOTION)
+                    
+                    if self.reorient_while_sliding_against_edge == False:
+                        self.collect_points_on_edge_bool = False
+                        self.reorient_while_sliding_against_edge = True
+                        ms_to_execute = Util.make_action_goal_yaw(
+                            position=[None, None, self.offset_below_surface],
+                            yaw=desired_yaw,
+                            frame_name=self.current_marker_frame_name
+                        )
+                    elif self.reorient_while_sliding_against_edge == True and self.contact_established_with_vertical_surface == False:
+                        self.contact_established_with_vertical_surface = True
+                        ms_to_execute = Util.make_action_goal_slide(
+                            velocity=[None, -self.slide_velocity, None],
+                            force=[None, None, -self.force_against_surface],
+                            orientation=self.desired_orientation,
+                            action_name="slide_until_edge",
+                            frame_name=self.current_marker_frame_name,
+                        )
+                    else:
+                        self.collect_points_on_edge_bool = True
+                        ms_to_execute = Util.make_action_goal_slide(
+                            velocity=[-self.slide_velocity, None, None],
+                            force=[None, -self.force_against_surface/1.2, -self.force_against_surface/1.2],
+                            orientation=self.desired_orientation,
+                            action_name=self.action_name_str,
+                            frame_name=self.current_marker_frame_name,
+                            time=3.0
+                        )
+                        self.last_direction_of_motion = [-self.dir_of_sliding_motion_2d[0], -self.dir_of_sliding_motion_2d[1], 0.0]
+                        self.last_direction_of_force_while_sliding_against_edge = [dir_of_force[0], dir_of_force[1], 0.0]
                 self.send_goal(ms_to_execute)
     
     def publish_corners_and_estimate_plane(self):
@@ -721,8 +934,12 @@ class ReasonerNode(ROSNode):
         for i in range(self.n_sides):
             if self.rck.corners[i] is not None:
                 point = self.rck.corners[i]
-                corner_points.append((point.x, point.y, point.z))
-        
+                # Ensure point is 3D (x, y, z); if only 2D, add z=0
+                if len(point) == 2:
+                    corner_points.append((point[0], point[1], 0.0))
+                else:
+                    corner_points.append(point)
+
                 self.create_and_publish_marker_pose(
                     position=point, 
                     orientation=self.current_orientation, 
@@ -747,6 +964,7 @@ class ReasonerNode(ROSNode):
             self.publish_corners_and_estimate_plane()
             self.exploration_complete = True
             self.get_logger().info("Exploration complete - all parameters known")
+            self._save_final_rck_to_json()
             rclpy.shutdown()
             return
         
@@ -824,12 +1042,11 @@ class ReasonerNode(ROSNode):
                 if self.rpk_rck_matching_idx_found and not self.rck_rearranged:
                     rearrange_rck_using_prior_knowledge(self.rck, self.rpk_first_idx_in_rck)
                     self.marker_id_for_edges[:] = self.marker_id_for_edges[self.rpk_first_idx_in_rck:] + self.marker_id_for_edges[:self.rpk_first_idx_in_rck] # rearrange marker ids in the same way as rck
+                    self.noisy_points_on_edge[:] = self.noisy_points_on_edge[self.rpk_first_idx_in_rck:] + self.noisy_points_on_edge[:self.rpk_first_idx_in_rck]
                     self.rck_rearranged = True
                     fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
                     self._propagate_knowledge(knowledge="rck")
                     self._sync_knowledge_to_graph()
-                    # Save updated rck to logs
-                    self._save_rck_to_json()
                     
                 # find dof after propagation to check if exploration is complete
                 self.dof = find_dof(self.rck)
@@ -837,8 +1054,7 @@ class ReasonerNode(ROSNode):
                 
                 # Update visualization
                 self._sync_knowledge_to_graph()
-                # Save updated rck to logs
-                self._save_rck_to_json()
+                self._save_rck_snapshot_if_configured('post_action_list_update')
     
     def _propagate_knowledge(self, knowledge: Literal["rck", "rpk"] = "rck",
                              min_points_to_remove_outliers: Optional[int] = None,
@@ -954,14 +1170,13 @@ class ReasonerNode(ROSNode):
                 self.get_logger().info("No action recommendation from action selection algorithm. Checking if knowledge is complete.")
                 self._propagate_knowledge(knowledge="rck") # propagate knowledge before checking dof to fill in any values that can be resolved based on current knowledge
                 self._sync_knowledge_to_graph()
-                # Save updated rck to logs
-                self._save_rck_to_json()
                 self.dof = find_dof(self.rck)
                 print(f"Degrees of freedom: {self.dof}")
                 if self.dof == 0:
                     self.exploration_complete = True
                     self.publish_corners_and_estimate_plane()
                     self.get_logger().info("Exploration complete - all parameters known")
+                    self._save_final_rck_to_json()
                     rclpy.shutdown()
                 else:
                     self.get_logger().warn("Knowledge is not complete but no action recommendation found. There might be an issue with action selection algorithm or the way knowledge is represented.")
@@ -1128,7 +1343,10 @@ class ReasonerNode(ROSNode):
                 rclpy.logging.get_logger(__name__).info(f"Action type {self.current_action_type.name} is in mode {self.current_action_spec.mode.name}, enabling sliding against edge state machine")
                 return 
             
-            elif self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK:
+            elif self.current_action_type in [
+                ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK,
+                ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CCK
+            ]:
                 edge_uv = self.rck.edge_unit_vectors[self.current_ref_edge_index]
                 edge_uv = self._validate_edge_uv_and_normalize(edge_uv)
                 perp_direction = (-edge_uv[1], edge_uv[0]) # (-uy, ux) when rotated by 90 degrees in anticlockwise direction, but since edge unit vector is anticlockwise
@@ -1151,7 +1369,11 @@ class ReasonerNode(ROSNode):
                 self.desired_velocity = [self.slide_velocity*edge_uv[0], self.slide_velocity*edge_uv[1], None]
                 
                 self.last_direction_of_motion = [edge_uv[0], edge_uv[1], 0.0]
-                self.action_name_str = "slide_until_edge"
+                
+                if self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CCK:
+                    self.action_name_str = "slide_parallel_to_edge_within_range"
+                else:
+                    self.action_name_str = "slide_until_edge"
                 action_list = [
                     # move above the surface
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
@@ -1183,7 +1405,10 @@ class ReasonerNode(ROSNode):
                 self.current_marker_frame_name = "marker_frame_0"
                 return action_list
             
-            elif self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK:
+            elif self.current_action_type in [
+                ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK,
+                ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CK
+            ]:
                 edge_uv = self.rck.edge_unit_vectors[self.current_ref_edge_index]                    
                 edge_uv = self._validate_edge_uv_and_normalize(edge_uv)
                 perp_direction = (-edge_uv[1], edge_uv[0]) # (-uy, ux) when rotated by 90 degrees in anticlockwise direction, but since edge unit vector is anticlockwise
@@ -1202,7 +1427,11 @@ class ReasonerNode(ROSNode):
                 self.desired_velocity = [self.slide_velocity*edge_uv_ck[0], self.slide_velocity*edge_uv_ck[1], None]
                 
                 self.last_direction_of_motion = [edge_uv_ck[0], edge_uv_ck[1], 0.0]
-                self.action_name_str = "slide_until_edge"
+                
+                if self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CK:
+                    self.action_name_str = "slide_parallel_to_edge_within_range"
+                else:
+                    self.action_name_str = "slide_until_edge"
                 action_list = [
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 orientation = self.current_orientation, 
@@ -1433,15 +1662,29 @@ class ReasonerNode(ROSNode):
                     
                     self.action_name_str = "touch_edge"
                     self.last_direction_of_motion = [desired_direction_of_motion[0], desired_direction_of_motion[1], 0.0]
+                    self.desired_orientation, desired_yaw = Util.resolve_orientation(
+                        dir_of_motion=desired_direction_of_motion,
+                        orientation_input=self.orientation_input)
+                    current_yaw = -float(R.from_quat(self.current_orientation).as_euler('zyx', degrees=True)[0])
+                    yaw_error = abs((current_yaw - desired_yaw + 180.0) % 360.0 - 180.0)
+
                     action_list = [
-                        Util.make_action_goal_move(position=[point_to_move_to[0], point_to_move_to[1], - self.offset_below_surface],
+                        Util.make_action_goal_move(position=[point_to_move_to[0], point_to_move_to[1], -self.offset_below_surface],
                                                     orientation = self.current_orientation,
-                                                    frame_name="marker_frame_0"),
+                                                    frame_name="marker_frame_0")
+                    ]
+                    if yaw_error > 5.0:
+                        action_list.append(
+                            Util.make_action_goal_yaw(position=[point_to_move_to[0], point_to_move_to[1], -self.offset_below_surface],
+                                                      yaw=desired_yaw,
+                                                      frame_name="marker_frame_0")
+                        )
+                    action_list.append(
                         Util.make_action_goal_touch(velocity=self.desired_velocity,
-                                                    orientation=self.current_orientation,
+                                                    orientation=self.desired_orientation,
                                                     frame_name="marker_frame_0",
                                                     action_name=self.action_name_str)
-                    ]
+                    )
                     self.current_marker_frame_name = "marker_frame_0"
                     return action_list
                 
@@ -1642,14 +1885,22 @@ class ReasonerNode(ROSNode):
             
             # get direction from collected points
             collected_points_2d = [(p[0], p[1]) for p in self.collected_points]
-            e_uv_before_resampling = Util.unit_vector_from_points_2d(collected_points_2d)
+            noisy_points_2d = collected_points_2d
+            e_uv_before_resampling = Util.unit_vector_from_points_2d(points=collected_points_2d)
             if self.debug_log: print("edge uv before resampling: ", e_uv_before_resampling)
             if self.debug_log: print("collected points 2d: ", collected_points_2d)
-            internal_points_2d = Util.resample_line_points(collected_points_2d)
+            try:
+                internal_points_2d = Util.resample_line_points(collected_points_2d)
+            except RuntimeError as e:
+                self.get_logger().warn(
+                    f"Could not resample collected edge points ({e}). "
+                    "Using raw collected points for this RCK update."
+                )
+                internal_points_2d = np.asarray(collected_points_2d, dtype=float)
             if self.debug_log: print("collected points 2d after resampling: ", internal_points_2d)
             radius_of_ee = self.diameter_of_end_effector * 0.5
             
-            edge_uv = Util.unit_vector_from_points_2d(internal_points_2d)
+            edge_uv = Util.unit_vector_from_points_2d(points=internal_points_2d)
             print("edge uv from points: ", edge_uv)
             
             # make it cck
@@ -1663,6 +1914,7 @@ class ReasonerNode(ROSNode):
                     self.get_logger().info("Sliding motion detected in the CK direction. Flipping direction to get correct edge unit vector")
                     edge_uv = [-edge_uv[0], -edge_uv[1]] # invert direction to match CCK direction
                 internal_points_2d = Util.offset_points(internal_points_2d, edge_uv, radius_of_ee, side='left')
+                noisy_points_2d = Util.offset_points(noisy_points_2d, edge_uv, radius_of_ee, side='left')
             elif self.current_action_spec.mode == Mode.AGAINST_VERTICAL:
                 if angle_with_direction_of_force < math.pi:
                     self.get_logger().info("Sliding motion detected in the CK direction. Flipping direction to get correct edge unit vector")
@@ -1670,8 +1922,10 @@ class ReasonerNode(ROSNode):
                 elif angle_with_direction_of_force > math.pi:
                     self.get_logger().info("Sliding motion detected in the CCK direction")
                 internal_points_2d = Util.offset_points(internal_points_2d, edge_uv, radius_of_ee, side='right')
+                noisy_points_2d = Util.offset_points(noisy_points_2d, edge_uv, radius_of_ee, side='right')
             # update internal points by taking offset into account and edge unit vector for the current reference edge based on sliding motion
-            self.rck.internal_points_on_edge[self.current_ref_edge_index] = [tuple(pt) if isinstance(pt, (list, tuple)) else pt for pt in internal_points_2d]
+            self.noisy_points_on_edge[self.current_ref_edge_index].extend([tuple(pt) if isinstance(pt, (list, tuple, np.ndarray)) else pt for pt in noisy_points_2d])
+            self.rck.internal_points_on_edge[self.current_ref_edge_index] = [tuple(pt) if isinstance(pt, (list, tuple, np.ndarray)) else pt for pt in internal_points_2d]
             self.rck.edge_unit_vectors[self.current_ref_edge_index] = (edge_uv[0], edge_uv[1])
             rclpy.logging.get_logger("Reasoner").info(f"Updated internal points and edge unit vector. Edge unit vector for edge {self.current_ref_edge_index} is now {self.rck.edge_unit_vectors[self.current_ref_edge_index]}")
 
@@ -1707,8 +1961,9 @@ class ReasonerNode(ROSNode):
                 elif self.current_action_spec.mode == Mode.AGAINST_EDGE: # valid action_name: slide_against_edge_until_corner
                     self.get_logger().info(f"Updated edge unit vector for edge {self.current_ref_edge_index} to {self.rck.edge_unit_vectors[self.current_ref_edge_index]} based on sliding motion against vertical surface")
                     if disjunction_id_for_edge_reflexive in result.disjunction_indices:
-                        self.rck.is_reflexive_angle[edge_idx_of_interest_reflexivity] = True
-                        rclpy.logging.get_logger("Reasoner").info(f"Updated angle type of edge {edge_idx_of_interest_reflexivity} to reflexive based on result of action {self.current_action_type.name}")
+                        # do nothing because, it might be due to a reflexive corner or due to the contact with the next edge's perpendicular surface
+                        rclpy.logging.get_logger("Reasoner").info(f"Result of action {self.current_action_type.name} is consistent with reflexive angle type for edge {edge_idx_of_interest_reflexivity}. Not updating angle type since it might be due to contact with next edge's perpendicular surface rather than reflexivity.")
+                        pass
                     elif disjunction_id_for_edge_non_reflexive in result.disjunction_indices:
                         self.rck.is_reflexive_angle[edge_idx_of_interest_reflexivity] = False
                         rclpy.logging.get_logger("Reasoner").info(f"Updated angle type of edge {edge_idx_of_interest_reflexivity} to non-reflexive based on result of action {self.current_action_type.name}")
@@ -1734,12 +1989,11 @@ class ReasonerNode(ROSNode):
             if self.rpk_rck_matching_idx_found and not self.rck_rearranged:
                 rearrange_rck_using_prior_knowledge(self.rck, self.rpk_first_idx_in_rck)
                 self.marker_id_for_edges[:] = self.marker_id_for_edges[self.rpk_first_idx_in_rck:] + self.marker_id_for_edges[:self.rpk_first_idx_in_rck] # rearrange marker ids in the same way as rck
+                self.noisy_points_on_edge[:] = self.noisy_points_on_edge[self.rpk_first_idx_in_rck:] + self.noisy_points_on_edge[:self.rpk_first_idx_in_rck]
                 self.rck_rearranged = True
                 fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
                 self._propagate_knowledge(knowledge="rck")
                 self._sync_knowledge_to_graph()
-                # Save updated rck to logs
-                self._save_rck_to_json()
                 
             # find dof after propagation to check if exploration is complete
             self.dof = find_dof(self.rck)
@@ -1747,8 +2001,7 @@ class ReasonerNode(ROSNode):
             
             # Update visualization
             self._sync_knowledge_to_graph()
-            # Save updated rck to logs
-            self._save_rck_to_json()
+            self._save_rck_snapshot_if_configured('sliding_state_machine_update')
             
         ## Update dihedrals when moved until edges
         
@@ -1775,37 +2028,66 @@ class ReasonerNode(ROSNode):
                                             ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CCK,
                                             ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CK,
                                             ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK,
-                                            ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK]):
+                                            ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK,
+                                            ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CCK,
+                                            ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CK]):
 
                 disjunction_id_for_dihedral_90 = 1
                 disjunction_id_for_dihedral_270 = 2
+                disjunction_id_for_no_edge = 3
                 
-                if self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_UNTIL_EDGE,
-                                                ActionType.SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT]:
-                    edge_idx_of_interest = ref_edge_idx
-                elif self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CCK,
-                                                  ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK]:
-                    edge_idx_of_interest = prev_edge_idx
-                elif self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CK,
-                                                  ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK]:
-                    edge_idx_of_interest = next_edge_idx
+                if self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CCK:
+                    if disjunction_id_for_no_edge in result.disjunction_indices:
+                        self.rck.is_reflexive_angle[next_edge_idx] = True
+                        rclpy.logging.get_logger("Reasoner").info(f"Updated angle type of edge {next_edge_idx} to reflexive based on result of action {self.current_action_type.name}")
+                    elif disjunction_id_for_dihedral_90 in result.disjunction_indices:
+                        self.rck.is_reflexive_angle[next_edge_idx] = False
+                        self.rck.dihedrals[next_edge_idx] = 90.0
+                        rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {next_edge_idx} to 90 degrees and angle type to non-reflexive based on result of action {self.current_action_type.name}")
+                    elif disjunction_id_for_dihedral_270 in result.disjunction_indices:
+                        self.rck.is_reflexive_angle[next_edge_idx] = False
+                        self.rck.dihedrals[next_edge_idx] = 270.0
+                        rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {next_edge_idx} to 270 degrees and angle type to non-reflexive based on result of action {self.current_action_type.name}")
+                elif self.current_action_type == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CK:
+                    if disjunction_id_for_no_edge in result.disjunction_indices:
+                        self.rck.is_reflexive_angle[ref_edge_idx] = True
+                        rclpy.logging.get_logger("Reasoner").info(f"Updated angle type of edge {ref_edge_idx} to reflexive based on result of action {self.current_action_type.name}")
+                    elif disjunction_id_for_dihedral_90 in result.disjunction_indices:
+                        self.rck.is_reflexive_angle[ref_edge_idx] = False
+                        self.rck.dihedrals[prev_edge_idx] = 90.0
+                        rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {prev_edge_idx} to 90 degrees and angle type of edge {ref_edge_idx} to non-reflexive based on result of action {self.current_action_type.name}")
+                    elif disjunction_id_for_dihedral_270 in result.disjunction_indices:
+                        self.rck.is_reflexive_angle[ref_edge_idx] = False
+                        self.rck.dihedrals[prev_edge_idx] = 270.0
+                        rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {prev_edge_idx} to 270 degrees and angle type of edge {ref_edge_idx} to non-reflexive based on result of action {self.current_action_type.name}")
                 
-                if disjunction_id_for_dihedral_90 in result.disjunction_indices:
-                    self.rck.dihedrals[edge_idx_of_interest] = 90.0
-                    rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {edge_idx_of_interest} to 90 degrees based on result of action {self.current_action_type.name}")
-                    # Note: this is approximate point on edge, which will be refined/filtered while sliding along this edge
-                    last_desired_velocity = self.desired_velocity
-                    norm = math.hypot(last_desired_velocity[0], last_desired_velocity[1])
-                    last_dir_of_motion = (last_desired_velocity[0]/norm, last_desired_velocity[1]/norm) if norm > 0 else (0, 0)
+                else:
+                    if self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_UNTIL_EDGE,
+                                                    ActionType.SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT]:
+                        edge_idx_of_interest = ref_edge_idx
+                    elif self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CCK,
+                                                    ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK]:
+                        edge_idx_of_interest = prev_edge_idx
+                    elif self.current_action_type in [ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CK,
+                                                    ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK]:
+                        edge_idx_of_interest = next_edge_idx
+                    
+                    if disjunction_id_for_dihedral_90 in result.disjunction_indices:
+                        self.rck.dihedrals[edge_idx_of_interest] = 90.0
+                        rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {edge_idx_of_interest} to 90 degrees based on result of action {self.current_action_type.name}")
+                        # Note: this is approximate point on edge, which will be refined/filtered while sliding along this edge
+                        last_desired_velocity = self.desired_velocity
+                        norm = math.hypot(last_desired_velocity[0], last_desired_velocity[1])
+                        last_dir_of_motion = (last_desired_velocity[0]/norm, last_desired_velocity[1]/norm) if norm > 0 else (0, 0)
 
-                    ee_offset_vector = self.diameter_of_end_effector * 0.5 * np.array(last_dir_of_motion)
-                    point_on_edge = (self.current_position[0] + ee_offset_vector[0], self.current_position[1] + ee_offset_vector[1])
-                    self.rck.internal_points_on_edge[edge_idx_of_interest].append(point_on_edge)
-                    rclpy.logging.get_logger("Reasoner").info(f"Updated internal points on edge {edge_idx_of_interest} with point {point_on_edge} based on result of action {self.current_action_type.name}")
-                elif disjunction_id_for_dihedral_270 in result.disjunction_indices:
-                    self.rck.dihedrals[edge_idx_of_interest] = 270.0
-                    rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {edge_idx_of_interest} to 270 degrees based on result of action {self.current_action_type.name}")
-            
+                        ee_offset_vector = self.diameter_of_end_effector * 0.5 * np.array(last_dir_of_motion)
+                        point_on_edge = (self.current_position[0] + ee_offset_vector[0], self.current_position[1] + ee_offset_vector[1])
+                        self.rck.internal_points_on_edge[edge_idx_of_interest].append(point_on_edge)
+                        rclpy.logging.get_logger("Reasoner").info(f"Updated internal points on edge {edge_idx_of_interest} with point {point_on_edge} based on result of action {self.current_action_type.name}")
+                    elif disjunction_id_for_dihedral_270 in result.disjunction_indices:
+                        self.rck.dihedrals[edge_idx_of_interest] = 270.0
+                        rclpy.logging.get_logger("Reasoner").info(f"Updated dihedral angle of edge {edge_idx_of_interest} to 270 degrees based on result of action {self.current_action_type.name}")
+
             elif (self.current_action_type == ActionType.MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CCK or
                   self.current_action_type == ActionType.MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CK):
                 # point on edge
@@ -1829,12 +2111,45 @@ class ReasonerNode(ROSNode):
             # propagate knowledge based on new observations
             self._propagate_knowledge()
             self._sync_knowledge_to_graph()
-            # Save updated rck to logs
-            self._save_rck_to_json()
+            self._save_rck_snapshot_if_configured('action_result_update')
             self.motion_indices_to_collect_points = []
                     
         # Clear collected points after each motion specification execution
         self.collected_points = []
+
+    def _project_ee_position_to_estimated_plane(self, position, orientation):
+        """
+        Intersect the EE tool z-axis with the estimated plane.
+
+        This corrects stored geometry points when the tool axis is not exactly
+        perpendicular to the plane: a z-height error can otherwise appear as an
+        x-y error in the edge samples when the orientation is not perfectly aligned.
+        """
+        
+        if not self.plane_slope_estimated:
+            return list(position)
+
+        position_np = np.asarray(position, dtype=float)
+        
+        # since ee pose is measured in the plane frame, plane origin is at (0,0,0) and plane normal is along z axis
+        plane_origin_np = np.zeros(3, dtype=float)
+        plane_normal = np.array([0.0, 0.0, 1.0], dtype=float)
+        
+        ee_z_axis = R.from_quat(orientation).as_matrix()[:, 2]
+
+        denom = float(np.dot(plane_normal, ee_z_axis))
+        if abs(denom) < 1e-6:
+            if self.debug_log:
+                print("Skipping EE point projection: tool z-axis is nearly parallel to estimated plane")
+            return position_np.tolist()
+
+        distance_along_ee_z = float(np.dot(plane_normal, plane_origin_np - position_np) / denom)
+        projected_position = position_np + distance_along_ee_z * ee_z_axis
+
+        if self.debug_log:
+            print(f"Projected EE point from {position_np.tolist()} to {projected_position.tolist()}")
+
+        return projected_position.tolist()
     
     def ee_callback(self, msg: PoseStamped):
         """
@@ -1846,15 +2161,15 @@ class ReasonerNode(ROSNode):
         
         self.first_state_update_received = True
         
-        ee_pose_frame_id = msg.header.frame_id        
+        self.ee_pose_frame_id = msg.header.frame_id        
         self.current_position = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
         self.current_orientation = [msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w]
 
-        # transform point from edge frame to plane frame if necessary
-        if (ee_pose_frame_id.startswith("marker_frame") and 
+        # transform point from edge frame to plane frame
+        if (self.ee_pose_frame_id.startswith("marker_frame") and 
             self.plane_slope_estimated):
-            if ee_pose_frame_id != "marker_frame_0":
-                if self.debug_log: print(f"Transforming current pose from frame {ee_pose_frame_id} to global frame using plane origin and orientation")
+            if self.ee_pose_frame_id != "marker_frame_0":
+                if self.debug_log: print(f"Transforming current pose from frame {self.ee_pose_frame_id} to global frame using plane origin and orientation")
                 if self.debug_log: print(f"Current position before transformation: {self.current_position}, Current orientation before transformation: {self.current_orientation}")
                 if self.debug_log: print(f"Current edge of interest origin: {self.current_edge_of_interest_origin}, Current edge of interest orientation: {self.current_edge_of_interest_orientation}")
                 self.current_position = Util.transform_points_local_to_global(
@@ -1868,9 +2183,14 @@ class ReasonerNode(ROSNode):
                 )
                 
             else:
-                if self.debug_log: print(f"The current pose is not transformed. Collected point is in frame {ee_pose_frame_id} ")
+                if self.debug_log: print(f"The current pose is not transformed. Collected point is in frame {self.ee_pose_frame_id} ")
+        
+            self.current_position = self._project_ee_position_to_estimated_plane(
+                self.current_position,
+                self.current_orientation
+            )
         else:
-            if self.debug_log: print(f"The current pose is not transformed. Either plane slope is not estimated yet or current marker frame {ee_pose_frame_id} does not start with 'marker_frame' ")
+            if self.debug_log: print(f"The current pose is not transformed. Either plane slope is not estimated yet or current marker frame {self.ee_pose_frame_id} does not start with 'marker_frame' ")
         
         current_motion_idx = self.next_action_idx - 1
         if (current_motion_idx in self.motion_indices_to_collect_points or
@@ -1924,18 +2244,22 @@ class ReasonerNode(ROSNode):
         pose_stamped.pose.orientation.y = qy
         pose_stamped.pose.orientation.z = qz
         pose_stamped.pose.orientation.w = qw
+        
+        # convert quaternion to euler angles for logging
+        r = R.from_quat([qx, qy, qz, qw])
+        euler_angles = r.as_euler('zyx', degrees=True)
 
 
         if marker_type == "marker":
             self.current_marker_id += 1
             self.publisher_marker.publish(pose_stamped)
-            print("SENDING MARKER")
+            print(f"SENDING MARKER {self.current_marker_id} at position {position} and orientation {euler_angles} in frame {pose_stamped.header.frame_id}")
         elif marker_type == "corner":
             self.publisher_corner.publish(pose_stamped)
-            print("SENDING CORNER")
+            print(f"SENDING CORNER at position {position} and orientation {euler_angles} in frame {pose_stamped.header.frame_id}")
         elif marker_type == "plane":
             self.publisher_plane.publish(pose_stamped)
-            print("SENDING PLANE")
+            print(f"SENDING PLANE at position {position} and orientation {euler_angles} in frame {pose_stamped.header.frame_id}")
         return
 
     def destroy_node(self):

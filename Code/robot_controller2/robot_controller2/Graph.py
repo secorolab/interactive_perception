@@ -149,6 +149,9 @@ def create_graph_from_json(data):
             attributes['angle'] = data_values.get(node['angle'])
             attributes['segment'] = node['segment']
             attributes['polygons'] = node['polygons']
+        elif node_type in ['exploratory_points', 'noisy_exploratory_points']:
+            attributes['segment'] = node['segment']
+            attributes['points'] = data_values.get(node['points_data_id'], [])
 
         # Add the node to the graph with the collected attributes
         graph.add_node(node_id, **attributes)

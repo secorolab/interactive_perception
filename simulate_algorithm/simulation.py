@@ -12,11 +12,17 @@ Functions:
 
 import math
 import random
+import sys
 import numpy as np
 from dataclasses import replace
+from pathlib import Path
 from scipy.optimize import linprog
 
 # Import from core_algorithm module
+CORE_ALGORITHM_SRC = Path(__file__).resolve().parents[1] / "core_algorithm"
+if CORE_ALGORITHM_SRC.exists():
+    sys.path.insert(0, str(CORE_ALGORITHM_SRC))
+
 from core_algorithm import (
     PolygonKnowledge,
     ActionType,
@@ -181,6 +187,7 @@ def simulate_robot(to_plot: bool = False,
                    degree_of_prior_knowledge: int = 0,
                    polygon_knowledge_gt: PolygonKnowledge | None = None,
                    shift_in_idx_for_rck: int = 2,
+                   step_limit: int = 20,
                    percentage_of_edge_filled: float = 0.6,
                    random_seed: int = 42) -> None:
     """
@@ -190,6 +197,7 @@ def simulate_robot(to_plot: bool = False,
     :param degree_of_prior_knowledge: Level of prior knowledge (0-4)
     :param polygon_knowledge_gt: Ground truth polygon; if None, default pentagon created
     :param shift_in_idx_for_rck: Index shift for rck initialization
+    :param step_limit: Maximum number of steps for simulation
     :param percentage_of_edge_filled: Percentage of edges with initial features (0-1)
     :param random_seed: Random seed for reproducibility
     :return: None
@@ -269,7 +277,7 @@ def simulate_robot(to_plot: bool = False,
     print(f"Initial DOF = {dof}")
 
     # Main simulation loop
-    while find_dof(rck) > 0 and steps < 15:
+    while find_dof(rck) > 0 and steps < step_limit:
         print("\n ***************  Step number: ", steps, "  ***************")
         act, edge_idx = next_action(rck, prev_action_instance, rck_rearranged, in_simulation=True, gt=gt)
         if act: print("Action to perform: ", act.name, " reference edge: ", edge_idx)
@@ -362,10 +370,39 @@ def simulate_robot(to_plot: bool = False,
                         edge_points.append(random_point)
                         break
 
+        elif act in (ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CCK,
+                     ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CK):
+            is_cck = act == ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_WITHIN_RANGE_CCK
+
+            if is_cck:
+                target_edge_idx = next_edge_idx
+                target_edge_idx_in_gt = next_edge_idx_in_gt
+                target_edge_head_idx_in_gt = second_next_edge_idx_in_gt
+                tested_corner_idx = next_edge_idx
+                tested_corner_idx_in_gt = next_edge_idx_in_gt
+            else:
+                target_edge_idx = prev_edge_idx
+                target_edge_idx_in_gt = prev_edge_idx_in_gt
+                target_edge_head_idx_in_gt = edge_idx_in_gt
+                tested_corner_idx = edge_idx
+                tested_corner_idx_in_gt = edge_idx_in_gt
+
+            corner_is_reflexive = gt.is_reflexive_angle[tested_corner_idx_in_gt]
+            rck.is_reflexive_angle[tested_corner_idx] = corner_is_reflexive
+
+            if corner_is_reflexive is False:
+                dihedral_angle = gt.dihedrals[target_edge_idx_in_gt]
+                rck.dihedrals[target_edge_idx] = dihedral_angle
+                if dihedral_angle == 90.0:
+                    rck.internal_points_on_edge[target_edge_idx].extend(get_random_points_on_line(
+                        gt.corners[target_edge_idx_in_gt], gt.corners[target_edge_head_idx_in_gt], num_points=1))
+
         elif act == ActionType.SLIDE_AGAINST_EDGE_UNTIL_CORNER_CCK:
             rck.internal_points_on_edge[edge_idx].extend(get_random_points_on_line(
                 gt.corners[edge_idx_in_gt], gt.corners[next_edge_idx_in_gt], num_points=2))
-            rck.is_reflexive_angle[next_edge_idx] = gt.is_reflexive_angle[next_edge_idx_in_gt]
+            if (gt.is_reflexive_angle[next_edge_idx_in_gt] is False and
+                    gt.dihedrals[next_edge_idx_in_gt] != 90.0):
+                rck.is_reflexive_angle[next_edge_idx] = False
             rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[next_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
         elif act == ActionType.SLIDE_AGAINST_VERTICAL_SURFACE_UNTIL_CORNER_CCK:
             rck.internal_points_on_edge[edge_idx].extend(get_random_points_on_line(
@@ -379,9 +416,11 @@ def simulate_robot(to_plot: bool = False,
                         gt.corners[next_edge_idx_in_gt], gt.corners[second_next_edge_idx_in_gt], num_points=1))
         elif act == ActionType.SLIDE_AGAINST_EDGE_UNTIL_CORNER_CK:
             rck.internal_points_on_edge[edge_idx].extend(get_random_points_on_line(
-                gt.corners[prev_edge_idx_in_gt], gt.corners[edge_idx_in_gt], num_points=2))
-            rck.is_reflexive_angle[prev_edge_idx] = gt.is_reflexive_angle[prev_edge_idx_in_gt]
-            rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[prev_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
+                gt.corners[edge_idx_in_gt], gt.corners[next_edge_idx_in_gt], num_points=2))
+            if (gt.is_reflexive_angle[edge_idx_in_gt] is False and
+                    gt.dihedrals[prev_edge_idx_in_gt] != 90.0):
+                rck.is_reflexive_angle[edge_idx] = False
+            rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[next_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
         elif act == ActionType.SLIDE_AGAINST_VERTICAL_SURFACE_UNTIL_CORNER_CK:
             rck.internal_points_on_edge[edge_idx].extend(get_random_points_on_line(
                 gt.corners[prev_edge_idx_in_gt], gt.corners[edge_idx_in_gt], num_points=2))
@@ -407,13 +446,15 @@ def simulate_robot(to_plot: bool = False,
             rck.internal_points_on_edge[next_edge_idx].extend(get_random_points_on_line(
                 gt.corners[next_edge_idx_in_gt], gt.corners[second_next_edge_idx_in_gt], num_points=1))
         elif act == ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CCK:
-            rck.internal_points_on_edge[prev_edge_idx].extend(get_random_points_on_line(
-                gt.corners[edge_idx_in_gt], gt.corners[prev_edge_idx_in_gt], num_points=1))
             rck.dihedrals[prev_edge_idx] = gt.dihedrals[prev_edge_idx_in_gt]
+            if rck.dihedrals[prev_edge_idx] == 90.0:
+                rck.internal_points_on_edge[prev_edge_idx].extend(get_random_points_on_line(
+                    gt.corners[prev_edge_idx_in_gt], gt.corners[edge_idx_in_gt], num_points=1))
         elif act == ActionType.SLIDE_OVER_SURFACE_PARALLEL_FROM_OUTSIDE_TO_EDGE_CK:
-            rck.internal_points_on_edge[next_edge_idx].extend(get_random_points_on_line(
-                gt.corners[edge_idx_in_gt], gt.corners[next_edge_idx_in_gt], num_points=1))
             rck.dihedrals[next_edge_idx] = gt.dihedrals[next_edge_idx_in_gt]
+            if rck.dihedrals[next_edge_idx] == 90.0:
+                rck.internal_points_on_edge[next_edge_idx].extend(get_random_points_on_line(
+                    gt.corners[next_edge_idx_in_gt], gt.corners[second_next_edge_idx_in_gt], num_points=1))
         elif act == ActionType.SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT:
             rck.dihedrals[edge_idx] = gt.dihedrals[edge_idx_in_gt]
 
@@ -451,7 +492,7 @@ def simulate_robot(to_plot: bool = False,
 if __name__ == "__main__":
     # Test simulation with default parameters
     random_seed = 7
-    num_sides = 5
+    num_sides = 8
     regular_polygon = False
     
     angles_deg_random = generate_internal_angles(
@@ -461,18 +502,30 @@ if __name__ == "__main__":
     )
     print("Generated angles (degrees): ", angles_deg_random)
     
-    poly_know_gt = generate_polygon(
-        n_sides=num_sides,
-        angles_deg=angles_deg_random,
-        random_seed=random_seed
-    )
+    # poly_know_gt = generate_polygon(
+    #     n_sides=num_sides,
+    #     angles_deg=angles_deg_random,
+    #     random_seed=random_seed
+    # )
+    
+    poly_know_gt = PolygonKnowledge(num_sides)
+    
+    poly_know_gt.corner_angles = [90, 90, 270, 90, 90, 90, 270, 90]
+    poly_know_gt.dihedrals = [270, 90, 270, 90, 270, 270, 270, 270]
+    poly_know_gt.corners[0] = (0.0, 0.0)
+    poly_know_gt.edge_unit_vectors[0] = (0.71, 0.71)
+    poly_know_gt.lengths = [50.0, 25.0, 25.0, 25.0, 50.0, 25.0, 25.0, 25.0]
+    
+    propagate_parameters(poly_know_gt)
+    
     poly_know_gt.print_knowledge("Ground truth polygon knowledge")
     
     simulate_robot(
         to_plot=True, 
         polygon_knowledge_gt=poly_know_gt,
-        degree_of_prior_knowledge=3,
+        degree_of_prior_knowledge=0,
         shift_in_idx_for_rck=2,
+        step_limit=40,
         percentage_of_edge_filled=1.0,
         random_seed=random_seed
     )
