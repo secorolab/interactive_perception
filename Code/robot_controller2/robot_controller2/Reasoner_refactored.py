@@ -405,6 +405,7 @@ class ReasonerNode(ROSNode):
         self.completed_action_type_count = 0
         self.completed_action_type_instances = []
         self.current_action_type_completion_recorded = False
+        self.current_action_type_start_time = None
         self.current_action_type_start_distance_m = None
         self.current_action_type_start_sample_count = None
         self.ee_distance_tracking_frame_id = self.config['frames']['base_frame']
@@ -655,6 +656,7 @@ class ReasonerNode(ROSNode):
         Mark the cumulative EE distance at the start of a high-level ActionType.
         """
         self.current_action_type_completion_recorded = False
+        self.current_action_type_start_time = datetime.now().astimezone()
         self.current_action_type_start_distance_m = self.ee_distance_total_m
         self.current_action_type_start_sample_count = self.ee_distance_sample_count
 
@@ -669,6 +671,12 @@ class ReasonerNode(ROSNode):
             return
 
         action_type_name = self.current_action_type.name
+        end_time = datetime.now().astimezone()
+        duration_seconds = (
+            (end_time - self.current_action_type_start_time).total_seconds()
+            if self.current_action_type_start_time is not None
+            else None
+        )
         start_distance_m = (
             self.current_action_type_start_distance_m
             if self.current_action_type_start_distance_m is not None
@@ -684,6 +692,13 @@ class ReasonerNode(ROSNode):
                 if self.current_ref_edge_index is not None
                 else None
             ),
+            "start_time": (
+                self.current_action_type_start_time.isoformat()
+                if self.current_action_type_start_time is not None
+                else None
+            ),
+            "end_time": end_time.isoformat(),
+            "duration_seconds": duration_seconds,
             "distance_traversed_m": distance_traversed_m,
             "distance_start_m": start_distance_m,
             "distance_end_m": self.ee_distance_total_m,
@@ -955,7 +970,7 @@ class ReasonerNode(ROSNode):
                         self.contact_established_with_vertical_surface = True
                         ms_to_execute = Util.make_action_goal_slide(
                             velocity=[None, -self.slide_velocity, None],
-                            force=[None, None, -self.force_against_surface],
+                            force=[None, None, -self.force_against_surface/2],
                             orientation=self.desired_orientation,
                             action_name="slide_until_edge",
                             frame_name=self.current_marker_frame_name,
@@ -988,7 +1003,7 @@ class ReasonerNode(ROSNode):
                         self.contact_established_with_vertical_surface = True
                         ms_to_execute = Util.make_action_goal_slide(
                             velocity=[None, -self.slide_velocity, None],
-                            force=[None, None, -self.force_against_surface],
+                            force=[None, None, -self.force_against_surface/2],
                             orientation=self.desired_orientation,
                             action_name="slide_until_edge",
                             frame_name=self.current_marker_frame_name,
@@ -1460,9 +1475,12 @@ class ReasonerNode(ROSNode):
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 orientation = self.current_orientation, 
                                                 frame_name="marker_frame_0"),
+                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface],
+                                                orientation = self.current_orientation,
+                                                frame_name="marker_frame_0"),
                     
                     # attain desired yaw
-                    Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
+                    Util.make_action_goal_yaw(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface],
                                                 yaw = desired_yaw,
                                                 frame_name="marker_frame_0"),
                     
@@ -1739,6 +1757,7 @@ class ReasonerNode(ROSNode):
                         desired_direction_of_motion = edge_uv
                         
                     point_to_move_to = (point_on_edge[0] + edge_uv[0]*self.slide_offset_from_edge, point_on_edge[1] + edge_uv[1]*self.slide_offset_from_edge) # point further away from edge in direction of edge unit vector
+                    
                     self.desired_velocity = [self.slide_velocity*desired_direction_of_motion[0], self.slide_velocity*desired_direction_of_motion[1], 0.0]
                     
                     self.action_name_str = "touch_edge"
