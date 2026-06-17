@@ -151,7 +151,7 @@ class GT_VisualizerNode(Node):
         self.declare_parameter("end_effector_frame", "end_effector")
         self.declare_parameter("ground_truth_frame", "ground_truth_object")
         self.declare_parameter("map_to_base_xyz", [2.0, 2.28, 0.8])
-        self.declare_parameter("ee_to_camera_xyz", [0.0, 0.05639, -0.00305])
+        self.declare_parameter("ee_to_camera_xyz", [0.0, 0.05639, -0.009525])
         self.declare_parameter("ee_pose_timeout_sec", 0.5)
         self.declare_parameter("marker_layout_mode", MarkerLayoutMode.CORNER_MARKERS.value)
         self.declare_parameter("n_markers_per_surface", 0)
