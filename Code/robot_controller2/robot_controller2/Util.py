@@ -732,6 +732,9 @@ def make_action_goal_slide(position=[None, None, None],
     unit_vector_of_force = [(f / force_magnitude) if (f is not None and force_magnitude > 0) else None
                             for f in force]
     velocity_spike_threshold = 0.045
+    # frame associatred with this edge will be approx at 7.5 cm from the e-eff center
+    # while sliding, e-eff center will be effectively at ~-3cm from the edge
+    y_ax_off_sliding_against_vertical_surface = 0.06
     velocity_spike_threshold_vector = [float(velocity_spike_threshold * uv) if uv is not None else None for uv in unit_vector_of_force]
     velocity_spike_opr_list = [
         gt if uv is not None and uv > 0
@@ -829,7 +832,7 @@ def make_action_goal_slide(position=[None, None, None],
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "number_of_disjunctions": 2,
-                "constraint_count": 6,
+                "constraint_count": 5,
                 "disjunction_id": 1,
                 "position": 1,
                 "type": "VELOCITY_XYZ",
@@ -862,20 +865,20 @@ def make_action_goal_slide(position=[None, None, None],
             })
 
         # disjunction 2
+        # current_template = edit_condition(current_template, {
+        #         "condition_type": "POST_CONDITION",
+        #         "disjunction_id": 2,
+        #         "position": 5,
+        #         "type": "VELOCITY_XYZ",
+        #         "value": [None, None, -0.01],
+        #         "operator": [None, None, lt]
+        #     })
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "disjunction_id": 2,
                 "position": 5,
-                "type": "VELOCITY_XYZ",
-                "value": [None, None, -0.01],
-                "operator": [None, None, lt]
-            })
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "disjunction_id": 2,
-                "position": 6,
                 "type": "POSITION_XYZ",
-                "value": [None, None, -0.015],
+                "value": [None, None, -0.01],
                 "operator": [None, None, lt]
             })
 
@@ -958,7 +961,7 @@ def make_action_goal_slide(position=[None, None, None],
         disjunction 3 (against vertical surface)  : slide until edge where reflexive corner;
         """
         
-        zero_vel_threshold = 0.001
+        zero_vel_threshold = 0.01
         zero_vel_ul = zero_vel_threshold
         zero_vel_ll = -zero_vel_threshold
         
@@ -966,7 +969,7 @@ def make_action_goal_slide(position=[None, None, None],
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "number_of_disjunctions": 3,
-                "constraint_count": 9,
+                "constraint_count": 7,
                 "disjunction_id": 1,
                 "position": 1,
                 "type": "VELOCITY_XYZ",
@@ -999,46 +1002,46 @@ def make_action_goal_slide(position=[None, None, None],
             })
 
         # disjunction 2
+        # current_template = edit_condition(current_template, {
+        #         "condition_type": "POST_CONDITION",
+        #         "disjunction_id": 2,
+        #         "position": 5,
+        #         "type": "VELOCITY_XYZ",
+        #         "value": [None, None, -0.01],
+        #         "operator": [None, None, lt]
+        #     })
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "disjunction_id": 2,
                 "position": 5,
-                "type": "VELOCITY_XYZ",
-                "value": [None, None, -0.01],
-                "operator": [None, None, lt]
-            })
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "disjunction_id": 2,
-                "position": 6,
                 "type": "POSITION_XYZ",
-                "value": [None, None, -0.01],
+                "value": [None, None, 0.0],
                 "operator": [None, None, lt]
             })
         
         # disjunction 3
+        # current_template = edit_condition(current_template, {
+        #         "condition_type": "POST_CONDITION",
+        #         "disjunction_id": 3,
+        #         "position": 6,
+        #         "type": "VELOCITY_XYZ",
+        #         "value": [None, velocity_spike_threshold_vector[1], None],
+        #         "operator": [None, lt, None]
+        #     })
+        current_template = edit_condition(current_template, {
+                "condition_type": "POST_CONDITION",
+                "disjunction_id": 3,
+                "position": 6,
+                "type": "POSITION_XYZ",
+                "value": [None, -y_ax_off_sliding_against_vertical_surface, 0.0],
+                "operator": [None, lt, gt]
+            })
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "disjunction_id": 3,
                 "position": 7,
-                "type": "VELOCITY_XYZ",
-                "value": [None, velocity_spike_threshold_vector[1], None],
-                "operator": [None, lt, None]
-            })
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "disjunction_id": 3,
-                "position": 8,
-                "type": "POSITION_XYZ",
-                "value": [None, None, -0.01],
-                "operator": [None, None, gt]
-            })
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "disjunction_id": 3,
-                "position": 9,
                 "type": "TIME_LIMIT",
-                "value": 2.0,
+                "value": 3.0,
                 "operator": gt
             })
         
@@ -1058,7 +1061,7 @@ def make_action_goal_slide(position=[None, None, None],
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "number_of_disjunctions": 3,
-                "constraint_count": 8,
+                "constraint_count": 7,
                 "disjunction_id": 1,
                 "position": 1,
                 "type": "VELOCITY_XYZ",
@@ -1091,20 +1094,20 @@ def make_action_goal_slide(position=[None, None, None],
             })
 
         # disjunction 2
+        # current_template = edit_condition(current_template, {
+        #         "condition_type": "POST_CONDITION",
+        #         "disjunction_id": 2,
+        #         "position": 5,
+        #         "type": "VELOCITY_XYZ",
+        #         "value": [None, None, -0.01],
+        #         "operator": [None, None, lt]
+        #     })
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "disjunction_id": 2,
                 "position": 5,
-                "type": "VELOCITY_XYZ",
-                "value": [None, None, -0.01],
-                "operator": [None, None, lt]
-            })
-        current_template = edit_condition(current_template, {
-                "condition_type": "POST_CONDITION",
-                "disjunction_id": 2,
-                "position": 6,
                 "type": "POSITION_XYZ",
-                "value": [None, None, -0.015],
+                "value": [None, None, -0.01],
                 "operator": [None, None, lt]
             })
         
@@ -1112,7 +1115,7 @@ def make_action_goal_slide(position=[None, None, None],
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "disjunction_id": 3,
-                "position": 7,
+                "position": 6,
                 "type": "MAX_DISTANCE_TRAVERSED",
                 "value": max_distance,
                 "operator": gt
@@ -1120,7 +1123,7 @@ def make_action_goal_slide(position=[None, None, None],
         current_template = edit_condition(current_template, {
                 "condition_type": "POST_CONDITION",
                 "disjunction_id": 3,
-                "position": 8,
+                "position": 7,
                 "type": "POSITION_XYZ",
                 "value": [None, None, -0.01],
                 "operator": [None, None, gt]
