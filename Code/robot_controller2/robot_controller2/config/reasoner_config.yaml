@@ -23,7 +23,7 @@ motion:
   force_along_edge_to_find_slope: 15.0
   diameter_of_end_effector: 0.0754
   offset_from_edge_while_sliding_against_vertical_surface: 0.019
-  distance_threshold_for_motion_detection: 0.02
+  distance_threshold_for_motion_detection: 0.015
   angle_increment_radians: 0.174533  # 10 degrees in radians
 
 # Action-specific default orientations
