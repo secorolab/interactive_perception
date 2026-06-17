@@ -3,7 +3,7 @@
 # Experiment and polygon settings
 experiment:
   id: 4
-  n_sides: 8
+  n_sides: 4
 
 # Knowledge propagation parameters
 knowledge_propagation:
@@ -22,6 +22,7 @@ motion:
   force_against_surface: 30.0
   force_along_edge_to_find_slope: 15.0
   diameter_of_end_effector: 0.0754
+  offset_from_edge_while_sliding_against_vertical_surface: 0.019
   distance_threshold_for_motion_detection: 0.02
   angle_increment_radians: 0.174533  # 10 degrees in radians
 
@@ -81,4 +82,4 @@ visualization:
 logging:
   # final_only: write one RCK JSON snapshot when exploration completes
   # on_update: also write timestamped RCK snapshots after RCK update/sync points
-  rck_save_mode: on_update
+  rck_save_mode: final_only

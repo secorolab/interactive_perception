@@ -402,6 +402,18 @@ class ReasonerNode(ROSNode):
         self._propagate_knowledge(knowledge="rck")
         self.dof = find_dof(self.rck)
         self.step_count = 0
+        self.completed_action_type_count = 0
+        self.completed_action_type_instances = []
+        self.current_action_type_completion_recorded = False
+        self.current_action_type_start_distance_m = None
+        self.current_action_type_start_sample_count = None
+        self.ee_distance_tracking_frame_id = self.config['frames']['base_frame']
+        self.ee_distance_total_m = 0.0
+        self.ee_distance_sample_count = 0
+        self.ee_distance_skipped_sample_count = 0
+        self.ee_distance_skipped_frame_mismatch_count = 0
+        self.ee_distance_last_position = None
+        self.ee_distance_last_frame_id = None
         
         # ====== Graph Representation ======
         # Create initial belief state graph from rck using automatic JSON generation
@@ -424,6 +436,10 @@ class ReasonerNode(ROSNode):
         self.offset_above_surface = self.config['motion']['offset_above_surface']
         self.offset_below_surface = self.config['motion']['offset_below_surface']
         self.diameter_of_end_effector = self.config['motion']['diameter_of_end_effector']
+        self.offset_from_edge_while_sliding_against_vertical_surface = self.config['motion'].get(
+            'offset_from_edge_while_sliding_against_vertical_surface',
+            0.0
+        )
         self.touch_velocity = self.config['motion']['touch_velocity']
         self.slide_velocity = self.config['motion']['slide_velocity']
         self.slide_offset_from_edge = self.config['motion']['slide_offset_from_edge']
@@ -585,15 +601,30 @@ class ReasonerNode(ROSNode):
                 "current_action_type": self.current_action_type.name if self.current_action_type else None,
                 "current_ref_edge_index": self.current_ref_edge_index,
                 "snapshot_label": snapshot_label,
-                "rck_save_mode": self.rck_save_mode
+                "rck_save_mode": self.rck_save_mode,
+                "motion_primitives": {
+                    "completed_action_type_count": self.completed_action_type_count,
+                    "action_type_instances": self.completed_action_type_instances,
+                },
+                "end_effector_distance": {
+                    "total_distance_m": self.ee_distance_total_m,
+                    "tracking_frame_id": self.ee_distance_tracking_frame_id,
+                    "sample_count": self.ee_distance_sample_count,
+                    "skipped_sample_count": self.ee_distance_skipped_sample_count,
+                    "skipped_frame_mismatch_count": self.ee_distance_skipped_frame_mismatch_count,
+                }
             }
 
-            self.rck_snapshot_count += 1
-            timestamp = snapshot_time.strftime("%Y%m%d_%H%M%S_%f")
-            history_file = os.path.join(
-                self.rck_history_dir,
-                f'rck_knowledge_{self.rck_snapshot_count:04d}_{snapshot_label}_{timestamp}.json'
-            )
+            if mark_final:
+                timestamp = snapshot_time.strftime("%Y%m%d_%H%M%S")
+                history_filename = f'rck_knowledge_{timestamp}.json'
+            else:
+                self.rck_snapshot_count += 1
+                timestamp = snapshot_time.strftime("%Y%m%d_%H%M%S_%f")
+                history_filename = (
+                    f'rck_knowledge_{self.rck_snapshot_count:04d}_{snapshot_label}_{timestamp}.json'
+                )
+            history_file = os.path.join(self.rck_history_dir, history_filename)
 
             with open(self.rck_json_path, 'w') as f:
                 json.dump(rck_json, f, indent=4)
@@ -618,6 +649,54 @@ class ReasonerNode(ROSNode):
         """
         if self.rck_save_mode == 'on_update':
             self._save_rck_to_json(snapshot_label=snapshot_label)
+
+    def _start_action_type_instance(self):
+        """
+        Mark the cumulative EE distance at the start of a high-level ActionType.
+        """
+        self.current_action_type_completion_recorded = False
+        self.current_action_type_start_distance_m = self.ee_distance_total_m
+        self.current_action_type_start_sample_count = self.ee_distance_sample_count
+
+    def _record_completed_action_type(self):
+        """
+        Record one completed high-level ActionType after its final motion goal succeeds.
+        """
+        if self.current_action_type is None:
+            return
+
+        if self.current_action_type_completion_recorded:
+            return
+
+        action_type_name = self.current_action_type.name
+        start_distance_m = (
+            self.current_action_type_start_distance_m
+            if self.current_action_type_start_distance_m is not None
+            else self.ee_distance_total_m
+        )
+        distance_traversed_m = max(0.0, self.ee_distance_total_m - start_distance_m)
+        self.completed_action_type_count += 1
+        self.completed_action_type_instances.append({
+            "instance_index": self.completed_action_type_count,
+            "action_type": action_type_name,
+            "ref_edge_index": (
+                int(self.current_ref_edge_index)
+                if self.current_ref_edge_index is not None
+                else None
+            ),
+            "distance_traversed_m": distance_traversed_m,
+            "distance_start_m": start_distance_m,
+            "distance_end_m": self.ee_distance_total_m,
+            "tracking_frame_id": self.ee_distance_tracking_frame_id,
+            "start_sample_count": self.current_action_type_start_sample_count,
+            "end_sample_count": self.ee_distance_sample_count,
+        })
+        self.current_action_type_completion_recorded = True
+        self.get_logger().info(
+            f"Completed action type {action_type_name}; distance traversed: "
+            f"{distance_traversed_m:.4f} m; total completed action types: "
+            f"{self.completed_action_type_count}"
+        )
 
     def _ref_frame_pose_to_json(self):
         """
@@ -1164,6 +1243,8 @@ class ReasonerNode(ROSNode):
             # get next action recommendation from action selection algorithm
             self.current_action_type, self.current_ref_edge_index = next_action(self.rck, self.prev_action_instance, self.rck_rearranged)
             self.current_action_spec = ACTION_TO_SPEC[self.current_action_type] if self.current_action_type is not None else None
+            if self.current_action_type is not None:
+                self._start_action_type_instance()
 
             # if next_action is None, check if knowledge is complete
             if self.current_action_type is None:
@@ -1873,6 +1954,8 @@ class ReasonerNode(ROSNode):
         elif result.ms_action_name in ["slide_against_edge_until_corner", 
                                        "slide_against_vertical_surface_until_corner", 
                                        "slide_against_surface_vector_only"]:
+            self._record_completed_action_type()
+
             # reset relevant flags
             self.sliding_against_edge_sm_active = False
             self.collect_points_on_edge_bool = False
@@ -1921,8 +2004,21 @@ class ReasonerNode(ROSNode):
                     edge_uv = [-edge_uv[0], -edge_uv[1]] # invert direction to match CCK direction
                 elif angle_with_direction_of_force > math.pi:
                     self.get_logger().info("Sliding motion detected in the CCK direction")
-                internal_points_2d = Util.offset_points(internal_points_2d, edge_uv, radius_of_ee, side='right')
-                noisy_points_2d = Util.offset_points(noisy_points_2d, edge_uv, radius_of_ee, side='right')
+                vertical_surface_offset_distance = (
+                    radius_of_ee + self.offset_from_edge_while_sliding_against_vertical_surface
+                )
+                internal_points_2d = Util.offset_points(
+                    internal_points_2d,
+                    edge_uv,
+                    vertical_surface_offset_distance,
+                    side='right'
+                )
+                noisy_points_2d = Util.offset_points(
+                    noisy_points_2d,
+                    edge_uv,
+                    vertical_surface_offset_distance,
+                    side='right'
+                )
             # update internal points by taking offset into account and edge unit vector for the current reference edge based on sliding motion
             self.noisy_points_on_edge[self.current_ref_edge_index].extend([tuple(pt) if isinstance(pt, (list, tuple, np.ndarray)) else pt for pt in noisy_points_2d])
             self.rck.internal_points_on_edge[self.current_ref_edge_index] = [tuple(pt) if isinstance(pt, (list, tuple, np.ndarray)) else pt for pt in internal_points_2d]
@@ -2016,6 +2112,7 @@ class ReasonerNode(ROSNode):
         # update knowledge when a set of motion specifications are executed
         if self.next_action_idx == self.length_action_list:
             print("Final action in list completed. Updating RCK based on result")
+            self._record_completed_action_type()
 
             ref_edge_idx = self.current_ref_edge_index
             prev_edge_idx = (ref_edge_idx - 1) % self.n_sides
@@ -2150,6 +2247,91 @@ class ReasonerNode(ROSNode):
             print(f"Projected EE point from {position_np.tolist()} to {projected_position.tolist()}")
 
         return projected_position.tolist()
+
+    def _ee_position_in_distance_tracking_frame(self, msg: PoseStamped):
+        """
+        Return the raw EE callback position expressed in the configured distance frame.
+        """
+        source_frame = msg.header.frame_id or ""
+        position = [
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z,
+        ]
+
+        if source_frame == self.ee_distance_tracking_frame_id:
+            return position, self.ee_distance_tracking_frame_id
+
+        if not source_frame.startswith("marker_frame"):
+            return None, None
+
+        # i.e., if source frame is not in tracking frame (base_link)
+        # and still plane details are not known, then we cannot transform
+        if self.plane_origin_position is None or self.plane_orientation is None:
+            return None, None
+
+        position_in_marker_0 = position
+        if source_frame != "marker_frame_0":
+            if (
+                self.current_edge_of_interest_origin is None or
+                self.current_edge_of_interest_orientation is None
+            ):
+                return None, None
+
+            # transform the point to marker_frame_0 (frame of the plane of interest)
+            position_in_marker_0 = Util.transform_points_local_to_global(
+                points=[position],
+                frame_position_wrt_global=self.current_edge_of_interest_origin,
+                frame_orientation_wrt_global=self.current_edge_of_interest_orientation,
+            )[0]
+
+        # if source frame starts with marker_frame and it is marker_frame_0
+        position_in_tracking_frame = Util.transform_points_local_to_global(
+            points=[position_in_marker_0],
+            frame_position_wrt_global=self.plane_origin_position,
+            frame_orientation_wrt_global=self.plane_orientation,
+        )[0]
+        return [float(value) for value in position_in_tracking_frame], self.ee_distance_tracking_frame_id
+
+    def _record_ee_distance_sample(self, msg: PoseStamped):
+        """
+        Accumulate EE path length from consecutive callback poses in one frame.
+        """
+        try:
+            position, frame_id = self._ee_position_in_distance_tracking_frame(msg)
+        except Exception as exc:
+            self.ee_distance_skipped_sample_count += 1
+            if self.debug_log:
+                self.get_logger().warn(f"Skipping EE distance sample: {exc}")
+            return
+
+        if position is None or frame_id is None:
+            self.ee_distance_skipped_sample_count += 1
+            return
+
+        position_np = np.asarray(position, dtype=float)
+        if not np.all(np.isfinite(position_np)):
+            self.ee_distance_skipped_sample_count += 1
+            return
+
+        if self.ee_distance_last_position is None:
+            self.ee_distance_last_position = position_np
+            self.ee_distance_last_frame_id = frame_id
+            self.ee_distance_sample_count += 1
+            return
+
+        if frame_id != self.ee_distance_last_frame_id:
+            self.ee_distance_skipped_frame_mismatch_count += 1
+            self.ee_distance_last_position = position_np
+            self.ee_distance_last_frame_id = frame_id
+            self.ee_distance_sample_count += 1
+            return
+
+        self.ee_distance_total_m += float(
+            np.linalg.norm(position_np - self.ee_distance_last_position)
+        )
+        self.ee_distance_last_position = position_np
+        self.ee_distance_sample_count += 1
     
     def ee_callback(self, msg: PoseStamped):
         """
@@ -2160,6 +2342,7 @@ class ReasonerNode(ROSNode):
         """
         
         self.first_state_update_received = True
+        self._record_ee_distance_sample(msg)
         
         self.ee_pose_frame_id = msg.header.frame_id        
         self.current_position = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
