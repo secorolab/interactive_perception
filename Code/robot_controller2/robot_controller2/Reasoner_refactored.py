@@ -381,6 +381,9 @@ class ReasonerNode(ROSNode):
         # ====== Knowledge Structures ======
         self.experiment_id = self.config['experiment']['id']
         self.n_sides = self.config['experiment']['n_sides']
+        self.validate_individual_match_across_fields = self.config.get(
+            'knowledge_propagation', {}
+        ).get('validate_individual_match_across_fields', False)
         
         ## Experiment 1: 4 sided polygon
         ## Experiment 2: complex polygon with n = 10 sides
@@ -444,6 +447,10 @@ class ReasonerNode(ROSNode):
         self.touch_velocity = self.config['motion']['touch_velocity']
         self.slide_velocity = self.config['motion']['slide_velocity']
         self.slide_offset_from_edge = self.config['motion']['slide_offset_from_edge']
+        self.offset_from_edge_while_moving_from_outside_to_edge = self.config['motion'].get(
+            'offset_from_edge_while_moving_from_outside_to_edge',
+            self.slide_offset_from_edge
+        )
         self.force_against_surface = self.config['motion']['force_against_surface']
         self.angle_increment_radians = self.config['motion']['angle_increment_radians']
         self.force_along_edge_to_find_slope = self.config['motion']['force_along_edge_to_find_slope']
@@ -1121,7 +1128,7 @@ class ReasonerNode(ROSNode):
                 # check if unique pattern is found for action selection
                 self.unique_pattern_found_in_rck = find_unique_pattern(self.rck)
 
-                if self.unique_pattern_found_in_rpk and self.unique_pattern_found_in_rck and not self.rpk_rck_matching_idx_found:
+                if self.unique_pattern_found_in_rpk and not self.rpk_rck_matching_idx_found:
                     self.get_logger().info(f"Unique_pattern_found_in_rpk: {self.unique_pattern_found_in_rpk}, unique_pattern_found_in_rck: {self.unique_pattern_found_in_rck}")
                     self.get_logger().info("Attempting to match rck with rpk...")
                     self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(self.rck, self.rpk)
@@ -1129,14 +1136,19 @@ class ReasonerNode(ROSNode):
                     if self.corner_coordinates_available_in_rpk:
                         print("Attempting to match rck with rpk using corner coordinates...")
                         self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(self.rck, self.rpk, match_corner_coordinates=True)
-                    else:
+                    elif self.unique_pattern_found_in_rpk:
                         print("Attempting to find unique pattern in individual parameters...")
-                        self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(self.rck, self.rpk, find_match_in_individual_parameters=True)
+                        self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(
+                            self.rck,
+                            self.rpk,
+                            find_match_in_individual_parameters=True,
+                            validate_individual_match_across_fields=self.validate_individual_match_across_fields)
                 
                 if self.rpk_rck_matching_idx_found and not self.rck_rearranged:
                     rearrange_rck_using_prior_knowledge(self.rck, self.rpk_first_idx_in_rck)
                     self.marker_id_for_edges[:] = self.marker_id_for_edges[self.rpk_first_idx_in_rck:] + self.marker_id_for_edges[:self.rpk_first_idx_in_rck] # rearrange marker ids in the same way as rck
                     self.noisy_points_on_edge[:] = self.noisy_points_on_edge[self.rpk_first_idx_in_rck:] + self.noisy_points_on_edge[:self.rpk_first_idx_in_rck]
+                    self._reindex_edge_references_after_rck_rearrangement()
                     self.rck_rearranged = True
                     fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
                     self._propagate_knowledge(knowledge="rck")
@@ -1149,6 +1161,23 @@ class ReasonerNode(ROSNode):
                 # Update visualization
                 self._sync_knowledge_to_graph()
                 self._save_rck_snapshot_if_configured('post_action_list_update')
+
+    def _reindex_edge_references_after_rck_rearrangement(self) -> None:
+        """Rotate edge-indexed execution state into the RPK-aligned RCK frame."""
+        shift = self.rpk_first_idx_in_rck
+        if shift is None:
+            raise RuntimeError("Cannot remap edge references without an RCK/RPK match index")
+
+        def remap_edge_index(edge_index: Optional[int]) -> Optional[int]:
+            if edge_index is None:
+                return None
+            return (edge_index - shift) % self.n_sides
+
+        self.current_ref_edge_index = remap_edge_index(self.current_ref_edge_index)
+        self.prev_action_instance = replace(
+            self.prev_action_instance,
+            edge_index=remap_edge_index(self.prev_action_instance.edge_index),
+        )
     
     def _propagate_knowledge(self, knowledge: Literal["rck", "rpk"] = "rck",
                              min_points_to_remove_outliers: Optional[int] = None,
@@ -1744,19 +1773,16 @@ class ReasonerNode(ROSNode):
                     edge_uv = self._validate_edge_uv_and_normalize(edge_uv)
                     edge_uv_ck = [-edge_uv[0], -edge_uv[1]]
                     
-                    points_on_edge = self.rck.internal_points_on_edge[self.current_ref_edge_index]
-                    if len(points_on_edge) == 0:
-                        self.get_logger().warn(f"No points on edge {self.current_ref_edge_index} to determine point for moving parallel to edge until contact. Stopping execution.")
-                        self.stop_execution = True
-                        return
                     if cw_motion:
-                        point_on_edge = points_on_edge[-1]
                         desired_direction_of_motion = edge_uv_ck
                     else:
-                        point_on_edge = points_on_edge[0]
                         desired_direction_of_motion = edge_uv
-                        
-                    point_to_move_to = (point_on_edge[0] + edge_uv[0]*self.slide_offset_from_edge, point_on_edge[1] + edge_uv[1]*self.slide_offset_from_edge) # point further away from edge in direction of edge unit vector
+
+                    perp_direction = (-edge_uv[1], edge_uv[0])
+                    point_to_move_to = (
+                        self.current_position[0] + perp_direction[0] * self.offset_from_edge_while_moving_from_outside_to_edge,
+                        self.current_position[1] + perp_direction[1] * self.offset_from_edge_while_moving_from_outside_to_edge
+                    )
                     
                     self.desired_velocity = [self.slide_velocity*desired_direction_of_motion[0], self.slide_velocity*desired_direction_of_motion[1], 0.0]
                     
@@ -2089,7 +2115,7 @@ class ReasonerNode(ROSNode):
             # check if unique pattern is found for action selection
             self.unique_pattern_found_in_rck = find_unique_pattern(self.rck)
 
-            if self.unique_pattern_found_in_rpk and self.unique_pattern_found_in_rck and not self.rpk_rck_matching_idx_found:
+            if self.unique_pattern_found_in_rpk and not self.rpk_rck_matching_idx_found:
                 self.get_logger().info(f"Unique_pattern_found_in_rpk: {self.unique_pattern_found_in_rpk}, unique_pattern_found_in_rck: {self.unique_pattern_found_in_rck}")
                 self.get_logger().info("Attempting to match rck with rpk...")
                 self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(self.rck, self.rpk)
@@ -2097,14 +2123,19 @@ class ReasonerNode(ROSNode):
                 if self.corner_coordinates_available_in_rpk:
                     print("Attempting to match rck with rpk using corner coordinates...")
                     self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(self.rck, self.rpk, match_corner_coordinates=True)
-                else:
+                elif self.unique_pattern_found_in_rpk:
                     print("Attempting to find unique pattern in individual parameters...")
-                    self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(self.rck, self.rpk, find_match_in_individual_parameters=True)
+                    self.rpk_rck_matching_idx_found, self.rpk_first_idx_in_rck = get_unique_pattern_ref_index(
+                        self.rck,
+                        self.rpk,
+                        find_match_in_individual_parameters=True,
+                        validate_individual_match_across_fields=self.validate_individual_match_across_fields)
             
             if self.rpk_rck_matching_idx_found and not self.rck_rearranged:
                 rearrange_rck_using_prior_knowledge(self.rck, self.rpk_first_idx_in_rck)
                 self.marker_id_for_edges[:] = self.marker_id_for_edges[self.rpk_first_idx_in_rck:] + self.marker_id_for_edges[:self.rpk_first_idx_in_rck] # rearrange marker ids in the same way as rck
                 self.noisy_points_on_edge[:] = self.noisy_points_on_edge[self.rpk_first_idx_in_rck:] + self.noisy_points_on_edge[:self.rpk_first_idx_in_rck]
+                self._reindex_edge_references_after_rck_rearrangement()
                 self.rck_rearranged = True
                 fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
                 self._propagate_knowledge(knowledge="rck")

@@ -88,6 +88,7 @@ def generate_prior_knowledge_from_gt(gt: PolygonKnowledge,
         - 2: only corner angles
         - 3: random features (controlled by percentage_of_edge_filled)
         - 4: full knowledge
+        - 5: custom partial prior knowledge
     :param percentage_of_edge_filled: Percentage of edges with features (between 0 and 1)
     :param random_seed: Random seed for reproducibility
     :return: Robot prior knowledge (rpk)
@@ -134,6 +135,15 @@ def generate_prior_knowledge_from_gt(gt: PolygonKnowledge,
             rpk.corner_angles[i] = gt.corner_angles[i]
             rpk.dihedrals[i] = gt.dihedrals[i]
             rpk.lengths[i] = gt.lengths[i]
+    elif degree_of_prior_knowledge == 5:
+        # Partial prior for pattern-matching, propagation, and DOF selection demo.
+        rpk.corner_angles = list(gt.corner_angles)
+
+        rpk.dihedrals[1] = gt.dihedrals[1]
+        rpk.dihedrals[5] = gt.dihedrals[5]
+
+        rpk.lengths[0] = gt.lengths[0]
+        rpk.corners[0] = gt.corners[0]
     else:
         raise ValueError("degree_of_prior_knowledge must be 0, 1, 2, 3, or 4")
     return rpk
@@ -186,10 +196,11 @@ def generate_polygon(n_sides: int, angles_deg: list[float], random_seed: int = 4
 def simulate_robot(to_plot: bool = False, 
                    degree_of_prior_knowledge: int = 0,
                    polygon_knowledge_gt: PolygonKnowledge | None = None,
-                   shift_in_idx_for_rck: int = 2,
+                   shift_in_idx_for_rck: int = 1,
                    step_limit: int = 20,
                    percentage_of_edge_filled: float = 0.6,
-                   random_seed: int = 42) -> None:
+                   random_seed: int = 42,
+                   validate_individual_match_across_fields: bool = False) -> None:
     """
     Run interactive simulation of robot reconstructing a polygon.
     
@@ -200,6 +211,8 @@ def simulate_robot(to_plot: bool = False,
     :param step_limit: Maximum number of steps for simulation
     :param percentage_of_edge_filled: Percentage of edges with initial features (0-1)
     :param random_seed: Random seed for reproducibility
+    :param validate_individual_match_across_fields: Whether individual-field
+    matches must also be consistent with all other known fields
     :return: None
     """
 
@@ -343,7 +356,7 @@ def simulate_robot(to_plot: bool = False,
             rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[next_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
         elif act == ActionType.SLIDE_AGAINST_EDGE_CK:
             rck.internal_points_on_edge[edge_idx].extend(get_random_points_on_line(
-                gt.corners[prev_edge_idx_in_gt], gt.corners[edge_idx_in_gt], num_points=2))
+                gt.corners[edge_idx_in_gt], gt.corners[next_edge_idx_in_gt], num_points=2))
             rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[next_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
         elif act in (ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK,
                      ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK):
@@ -423,10 +436,10 @@ def simulate_robot(to_plot: bool = False,
             rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[next_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
         elif act == ActionType.SLIDE_AGAINST_VERTICAL_SURFACE_UNTIL_CORNER_CK:
             rck.internal_points_on_edge[edge_idx].extend(get_random_points_on_line(
-                gt.corners[prev_edge_idx_in_gt], gt.corners[edge_idx_in_gt], num_points=2))
-            rck.is_reflexive_angle[prev_edge_idx] = gt.is_reflexive_angle[prev_edge_idx_in_gt]
-            rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[prev_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
-            if rck.is_reflexive_angle[prev_edge_idx] == False:
+                gt.corners[edge_idx_in_gt], gt.corners[next_edge_idx_in_gt], num_points=2))
+            rck.is_reflexive_angle[edge_idx] = gt.is_reflexive_angle[edge_idx_in_gt]
+            rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[next_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
+            if rck.is_reflexive_angle[edge_idx] == False:
                 rck.dihedrals[prev_edge_idx] = gt.dihedrals[prev_edge_idx_in_gt]
                 if rck.dihedrals[prev_edge_idx] == 90.0:
                     rck.internal_points_on_edge[prev_edge_idx].extend(get_random_points_on_line(
@@ -437,8 +450,8 @@ def simulate_robot(to_plot: bool = False,
             rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[next_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
         elif act == ActionType.SLIDE_AGAINST_VERTICAL_SURFACE_CK:
             rck.internal_points_on_edge[edge_idx].extend(get_random_points_on_line(
-                gt.corners[edge_idx_in_gt], gt.corners[prev_edge_idx_in_gt], num_points=2))
-            rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[prev_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
+                gt.corners[edge_idx_in_gt], gt.corners[next_edge_idx_in_gt], num_points=2))
+            rck.edge_unit_vectors[edge_idx] = get_unit_vector(gt.corners[next_edge_idx_in_gt], gt.corners[edge_idx_in_gt])
         elif act == ActionType.MOVE_PARALLEL_FROM_OUTSIDE_TO_EDGE_UNTIL_CONTACT_CCK:
             rck.internal_points_on_edge[prev_edge_idx].extend(get_random_points_on_line(
                 gt.corners[edge_idx_in_gt], gt.corners[prev_edge_idx_in_gt], num_points=1))
@@ -462,7 +475,7 @@ def simulate_robot(to_plot: bool = False,
         propagate_parameters(rck)
         unique_pattern_found_in_rck = find_unique_pattern(rck)
 
-        if unique_pattern_found_in_rpk and unique_pattern_found_in_rck and not rpk_rck_matching_idx_found:
+        if unique_pattern_found_in_rpk and not rpk_rck_matching_idx_found:
             print("Unique_pattern_found_in_rpk: ", unique_pattern_found_in_rpk
                   , ", unique_pattern_found_in_rck: ", unique_pattern_found_in_rck)
             print("Attempting to match rck with rpk...")
@@ -471,12 +484,23 @@ def simulate_robot(to_plot: bool = False,
             if corner_coordinates_available_in_rpk:
                 print("Attempting to match rck with rpk using corner coordinates...")
                 rpk_rck_matching_idx_found, rpk_first_idx_in_rck = get_unique_pattern_ref_index(rck, rpk, match_corner_coordinates=True)
-            else:
+            elif unique_pattern_found_in_rpk:
                 print("Attempting to find unique pattern in individual parameters...")
-                rpk_rck_matching_idx_found, rpk_first_idx_in_rck = get_unique_pattern_ref_index(rck, rpk, find_match_in_individual_parameters=True)
+                rpk_rck_matching_idx_found, rpk_first_idx_in_rck = get_unique_pattern_ref_index(
+                    rck,
+                    rpk,
+                    find_match_in_individual_parameters=True,
+                    validate_individual_match_across_fields=validate_individual_match_across_fields)
         
         if rpk_rck_matching_idx_found and not rck_rearranged:
+            print("Matching index found between rpk and rck. rpk's first idx can be found at this idx in rck: ", rpk_first_idx_in_rck)
             rearrange_rck_using_prior_knowledge(rck, rpk_first_idx_in_rck)
+            if prev_action_instance.edge_index is not None:
+                # Keep action history in the same index frame as the rearranged RCK.
+                prev_action_instance = replace(
+                    prev_action_instance,
+                    edge_index=(prev_action_instance.edge_index - rpk_first_idx_in_rck) % number_of_sides,
+                )
             rck_rearranged = True
             shift_in_idx_for_rck = 0
             fill_missing_parameters(rck, rpk, rpk_rck_matching_idx_found)
@@ -523,9 +547,10 @@ if __name__ == "__main__":
     simulate_robot(
         to_plot=True, 
         polygon_knowledge_gt=poly_know_gt,
-        degree_of_prior_knowledge=0,
-        shift_in_idx_for_rck=2,
+        degree_of_prior_knowledge=5,
+        shift_in_idx_for_rck=1,
         step_limit=40,
         percentage_of_edge_filled=1.0,
-        random_seed=random_seed
+        random_seed=random_seed,
+        validate_individual_match_across_fields=True
     )

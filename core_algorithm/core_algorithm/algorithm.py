@@ -16,6 +16,15 @@ import random
 logger = logging.getLogger(__name__)
 
 
+def unit_vectors_have_same_slope(a, b, tol_in_deg):
+    min_same_slope_dot = math.cos(math.radians(tol_in_deg))
+    min_same_slope_dot_sq = min_same_slope_dot * min_same_slope_dot
+    dot = a[0] * b[0] + a[1] * b[1]
+    norm_product_sq = ((a[0] * a[0] + a[1] * a[1]) *
+                       (b[0] * b[0] + b[1] * b[1]))
+    return norm_product_sq > 0.0 and dot * dot >= min_same_slope_dot_sq * norm_product_sq
+
+
 def feasible_bounded_lengths(edge_unit_vectors: list,
                              seed: int = 47,
                              lower_bound: float = 0.5,
@@ -299,25 +308,44 @@ def propagate_parameters(polygon_knowledge: PolygonKnowledge,
 
 
 def find_unique_pattern(polygon_knowledge: PolygonKnowledge,
-                        tol: float = 1e-9) -> bool:
+                        tol: float = 1e-9, uv_tol_in_deg: float = 10.0) -> bool:
     """
-    Check if multiple sequences are jointly unique under rotation, considering None as wildcard
+    Check whether known polygon parameters uniquely determine the cyclic edge indexing.
+
+    A non-zero rotation is considered possible unless it creates at least one
+    known-vs-known conflict. Unknown entries (`None`) are unconstrained and are
+    ignored during comparison. For example, [1, 2, 3, None] can already be
+    unique if every non-zero rotation conflicts on known values, while
+    [1, 2, None, None] may remain ambiguous because some rotations only compare
+    known values against unknown positions.
 
     :param polygon_knowledge: Prior knowledge of the polygon
     :param tol: Tolerance for numerical comparison
-    :param print_log: Whether to print detailed log
+    :param uv_tol_in_deg: Tolerance for unit vector comparison in degrees
     :return is_unique: Whether the sequences are jointly unique
     """
 
     pk = polygon_knowledge
-    sequences = [pk.dihedrals, pk.corner_angles, pk.slopes, pk.lengths] #TODO: add unit vector instead of slope
-    n = len(sequences[0])
 
-    def rotation_preserves(seq, k):
+    sequences = [pk.dihedrals, pk.corner_angles, pk.edge_unit_vectors, pk.lengths, pk.is_reflexive_angle]
+    n = len(sequences[0])
+    unit_vector_seq_idx = 2
+    reflexive_angle_seq_idx = 4
+
+
+    def rotation_preserves(seq, k, compare_unit_vectors=False, compare_boolean=False):
         for i in range(n):
             a = seq[i]
             b = seq[(i + k) % n]
-            if a is not None and b is not None and not is_close(a, b, tol=tol):
+            if a is None or b is None:
+                continue
+            if compare_unit_vectors:
+                if not unit_vectors_have_same_slope(a, b, tol_in_deg=uv_tol_in_deg):
+                    return False
+            elif compare_boolean:
+                if a != b:
+                    return False
+            elif not is_close(a, b, tol=tol):
                 return False
         return True
 
@@ -327,7 +355,10 @@ def find_unique_pattern(polygon_knowledge: PolygonKnowledge,
     for idx, seq in enumerate(sequences):
         preserved = set()
         for k in range(n):
-            if rotation_preserves(seq, k):
+            if rotation_preserves(seq,
+                                  k,
+                                  compare_unit_vectors=(idx == unit_vector_seq_idx),
+                                  compare_boolean=(idx == reflexive_angle_seq_idx)):
                 preserved.add(k)
         per_sequence_rotations.append(preserved)
 
@@ -350,18 +381,33 @@ def find_unique_pattern(polygon_knowledge: PolygonKnowledge,
     return False
 
 
-def is_cyclically_unique(field, tol):
+def is_cyclically_unique(field, tol, compare_unit_vectors=False, uv_tol_in_deg=10.0):
     """
     Check if a sequence is unique under cyclic rotations
 
     :param field: List of values (can contain None as wildcard)
     :param tol: Tolerance for numerical comparison
+    :param compare_unit_vectors: Whether values are edge unit vectors
+    :param uv_tol_in_deg: Tolerance for unit vector comparison in degrees
     """
 
     n = len(field)
 
     def is_same(a, b):
-        return all(is_close(x, y, tol=tol) for x, y in zip(a, b))
+        for x, y in zip(a, b):
+            if x is None or y is None:
+                continue
+            if isinstance(x, (bool, np.bool_)) or isinstance(y, (bool, np.bool_)):
+                if x != y:
+                    return False
+                continue
+            if compare_unit_vectors:
+                if not unit_vectors_have_same_slope(x, y, tol_in_deg=uv_tol_in_deg):
+                    return False
+                continue
+            if not is_close(x, y, tol=tol):
+                return False
+        return True
 
     for shift in range(1, n):
         rotated = field[shift:] + field[:shift]
@@ -375,53 +421,94 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
                                  prior_knowledge: PolygonKnowledge,
                                  match_corner_coordinates: bool = False,
                                  find_match_in_individual_parameters: bool = False,
-                                 tol: float = 0.01) -> Tuple[bool, Optional[int]]:
+                                 tol: float = 0.01,
+                                 uv_tol_in_deg: float = 10.0,
+                                 validate_individual_match_across_fields: bool = False) -> Tuple[bool, Optional[int]]:
     """
     Pattern matching using combinations of features
 
     :param current_knowledge: Current knowledge of the polygon
     :param prior_knowledge: Prior model knowledge of the polygon
     :param match_corner_coordinates: Whether to match pattern first on the basis of corners before using rest of the knowledge
-    :param find_match_in_individual_parameters: Whether to check if any of the parameters can individually give a unique match rather than checking for uniqueness across all parameters jointly
+    :param find_match_in_individual_parameters: Whether to check if any of the parameters can individually give a unique match 
+    rather than checking for uniqueness across all parameters jointly
+    :param tol: Tolerance for numerical comparison
+    :param uv_tol_in_deg: Tolerance for unit vector comparison in degrees
+    :param validate_individual_match_across_fields: If True, a match found from
+    one individual field must also be consistent with all other known fields
     :return: Whether a unique pattern is found and if so, the index of the first edge in current_knowledge
     """
 
     rck = current_knowledge
     rpk = prior_knowledge
     n_sides = rck.n_sides
+    fields_to_check = ['slopes',  'edge_unit_vectors', 'lengths',
+                       'corners', 'corner_angles',     'dihedrals',
+                       'is_reflexive_angle']
 
-    # Note: there are constraints such as no two adjacent edges have same slope or uniit-vecotr. 
-    # This leads to adding few constraints to determinatoin of uniqueness (TODO?)
+    def field_values_match(rck_value, rpk_value, compare_unit_vectors=False, compare_boolean=False):
+        if rck_value is None or rpk_value is None:
+            return True
+        if compare_unit_vectors:
+            return unit_vectors_have_same_slope(rck_value, rpk_value, tol_in_deg=uv_tol_in_deg)
+        if compare_boolean:
+            return rck_value == rpk_value
+        return is_close(rck_value, rpk_value, tol=tol)
+
+    def shift_is_consistent_across_fields(shift):
+        for field in fields_to_check:
+            rpk_field = getattr(rpk, field)
+            rck_field = getattr(rck, field)
+            compare_unit_vectors = field == 'edge_unit_vectors'
+            compare_boolean = field == 'is_reflexive_angle'
+            for i in range(n_sides):
+                if not field_values_match(rck_field[(i + shift) % n_sides],
+                                          rpk_field[i],
+                                          compare_unit_vectors=compare_unit_vectors,
+                                          compare_boolean=compare_boolean):
+                    return False
+        return True
+
+    # Note: there are constraints such as no two adjacent edges have same slope or unit-vecotr. 
+    # This leads to adding few constraints in determining uniqueness (TODO?)
     if find_match_in_individual_parameters:
         # Motivation: for example, if initially it is known that only one edge dihedral angle is unique, then when it is perceived, 
-        # it can lead to matching indices without 
-        fields_to_check = ['slopes',  'edge_unit_vectors', 'lengths',
-                           'corners', 'corner_angles',     'dihedrals']
+        # it can lead to matching indices without checking for complete uniqueness across all parameters. This also allows to find a unique match with partial knowledge
 
-        def matches(curr_knw_rotated, prior_knw_field):
+        def matches(curr_knw_rotated, prior_knw_field, compare_unit_vectors=False, compare_boolean=False):
             for a, b in zip(curr_knw_rotated, prior_knw_field):
-                if a is not None and not is_close(a, b):
+                if not field_values_match(a,
+                                          b,
+                                          compare_unit_vectors=compare_unit_vectors,
+                                          compare_boolean=compare_boolean):
                     return False
             return True
 
         for field in fields_to_check:
             rpk_field = getattr(rpk, field)
             rck_field = getattr(rck, field)
-            # one field of prior knowledge must be complete
-            if not all(v is not None for v in rpk_field):
-                continue
-            # check cyclic uniqueness
-            if not is_cyclically_unique(rpk_field, tol):
+            compare_unit_vectors = field == 'edge_unit_vectors'
+            if not is_cyclically_unique(rpk_field,
+                                        tol,
+                                        compare_unit_vectors=compare_unit_vectors,
+                                        uv_tol_in_deg=uv_tol_in_deg):
                 continue
 
             count = 0
             shift_idx_rck = None
-            for shift in range(n):
+            compare_boolean = field == 'is_reflexive_angle'
+            for shift in range(n_sides):
                 rotated = rck_field[shift:] + rck_field[:shift]
-                if matches(rotated, rpk_field):
+                if matches(rotated,
+                           rpk_field,
+                           compare_unit_vectors=compare_unit_vectors,
+                           compare_boolean=compare_boolean):
                     count += 1
                     shift_idx_rck = shift
             if count == 1:
+                if (validate_individual_match_across_fields and
+                    not shift_is_consistent_across_fields(shift_idx_rck)):
+                    continue
                 return True, shift_idx_rck
         logger.info("No unique match found in individual parameters.")
         return False, None
@@ -436,25 +523,39 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
                     return True, (c-p) % n_sides
         return False, None
 
-    rp_sequences = [rpk.dihedrals, rpk.corner_angles, rpk.slopes, rpk.lengths]
-    rc_sequences = [rck.dihedrals, rck.corner_angles, rck.slopes, rck.lengths]
-    n = len(rp_sequences[0]) # number of edges
-    m = len(rp_sequences)    # number of parameters
+    fields_to_match = [
+        ('dihedrals', False, False),
+        ('corner_angles', False, False),
+        ('edge_unit_vectors', True, False),
+        ('slopes', False, False),
+        ('lengths', False, False),
+        ('is_reflexive_angle', False, True),
+    ]
+    n = rpk.n_sides # number of edges
 
     valid_rotations = []
 
     for k in range(n):
         pattern_found = True
-        for f in range(m):
-            rp = rp_sequences[f]
-            rc = rc_sequences[f]
+        for field, compare_unit_vectors, compare_boolean in fields_to_match:
+            rp = getattr(rpk, field)
+            rc = getattr(rck, field)
             # check for consistency under k-rotation by shifting rc by k positions
             for i in range(n):
                 a = rp[i]
                 b = rc[(i + k) % n]
-                if a is not None and b is not None and not is_close(a, b, tol=tol):
-                    pattern_found = False
-                    break
+                if a is not None and b is not None:
+                    if compare_unit_vectors:
+                        if not unit_vectors_have_same_slope(a, b, tol_in_deg=uv_tol_in_deg):
+                            pattern_found = False
+                            break
+                    elif compare_boolean:
+                        if a != b:
+                            pattern_found = False
+                            break
+                    elif not is_close(a, b, tol=tol):
+                        pattern_found = False
+                        break
             # if current k position switch is invalid, break the loop
             if not pattern_found:
                 break
@@ -462,9 +563,10 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
             valid_rotations.append(k)
 
     if len(valid_rotations) == 0:
-        raise ValueError("No valid rotation: polygons do not match.")
-    if len(valid_rotations) > 1:
-        raise ValueError(f"Ambiguous mapping: multiple rotations possible {valid_rotations}")
+        return False, None
+    elif len(valid_rotations) > 1:
+        print(f"Ambiguous mapping: multiple rotations possible {valid_rotations}")
+        return False, None
 
     return True, valid_rotations[0]
 
@@ -526,9 +628,11 @@ def next_action(know: PolygonKnowledge,
 
         points_on_prev_edge = know.get_all_points_on_edge(prev_i)
         points_on_next_edge = know.get_all_points_on_edge(next_i)
-        points_on_edge = know.get_all_points_on_edge(i)
 
-        should_explore_edge = edge_vector is None or len(points_on_edge) == 0
+        # `get_all_points_on_edge()` includes adjacent corners. A known head
+        # corner alone is a motion reference, but does not determine this
+        # edge's length or make the edge fully explored.
+        should_explore_edge = edge_vector is None or know.lengths[i] is None
         if should_explore_edge:
             if not rck_rearranged:
                 # when there is no matching indices found b/w rck and rpk, 

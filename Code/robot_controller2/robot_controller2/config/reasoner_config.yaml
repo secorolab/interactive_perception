@@ -9,6 +9,7 @@ experiment:
 knowledge_propagation:
   min_points_to_remove_outliers: 4
   inlier_distance_threshold: 0.02
+  validate_individual_match_across_fields: true
 
 # Motion and action settings
 motion:
@@ -19,6 +20,7 @@ motion:
   touch_velocity: 0.03
   slide_velocity: 0.05
   slide_offset_from_edge: 0.05
+  offset_from_edge_while_moving_from_outside_to_edge: 0.04
   force_against_surface: 30.0
   force_along_edge_to_find_slope: 15.0
   diameter_of_end_effector: 0.0754
