@@ -1907,6 +1907,7 @@ class ReasonerNode(ROSNode):
         ms_parsed = ast.literal_eval(motion_specification)
         
         self.get_logger().info("Sending goal:\n" + json.dumps(ms_parsed, indent=4))
+        self.rck.print_knowledge("Robot Current Knowledge (rck) [Before sending goal]")
         
         send_goal_future = self.client.send_goal_async(
             goal_msg,

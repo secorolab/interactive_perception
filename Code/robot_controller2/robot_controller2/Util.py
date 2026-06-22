@@ -743,7 +743,7 @@ def make_action_goal_slide(position=[None, None, None],
         for uv in unit_vector_of_force
     ]
     
-    if orientation:
+    if orientation is not None:
         qx, qy, qz, qw = orientation
         qx = float(qx) if qx is not None else None
         qy = float(qy) if qy is not None else None
@@ -783,7 +783,7 @@ def make_action_goal_slide(position=[None, None, None],
         "operator": pos_opr_list
     })
 
-    if orientation:
+    if orientation is not None:
         current_template = edit_condition(current_template, {
             "condition_type": "PER_CONDITION",
             "position": 4,
