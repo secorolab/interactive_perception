@@ -11,6 +11,12 @@ from scipy.optimize import linprog
 from .polygon_knowledge import PolygonKnowledge
 from .helper import *
 from .data_structures import *
+from .symbolic_policy import (
+    predict_edge_exploration,
+    propagate_symbolic,
+    symbolic_dof,
+    symbolic_from_polygon_knowledge,
+)
 import random
 
 logger = logging.getLogger(__name__)
@@ -589,8 +595,23 @@ def next_action(know: PolygonKnowledge,
 
     num_sides = know.n_sides
     edges_available_to_explore = []
+    pose_anchor_candidates = set()
     best_edge_idx  = None # edge whose exploration reduces dof the most among accessible edges to explore
     all_edge_unit_vectors_and_atleast_one_point_on_each_known = has_unit_vectors_and_points_for_all_edges(know)
+
+    # Prior propagation can make every intrinsic edge parameter known while
+    # leaving the polygon globally unanchored. In that state, a point on an
+    # adjacent nonparallel edge is still required to infer a corner by line
+    # intersection.
+    intrinsic_geometry_complete = (
+        all(vector is not None for vector in know.edge_unit_vectors)
+        and all(length is not None for length in know.lengths)
+    )
+    needs_pose_anchor = (
+        rck_rearranged
+        and intrinsic_geometry_complete
+        and not any(corner is not None for corner in know.corners)
+    )
 
     # if all edges are known, find any missing dihedrals
     if all_edge_unit_vectors_and_atleast_one_point_on_each_known:
@@ -628,6 +649,8 @@ def next_action(know: PolygonKnowledge,
 
         points_on_prev_edge = know.get_all_points_on_edge(prev_i)
         points_on_next_edge = know.get_all_points_on_edge(next_i)
+        prev_edge_has_direct_observation = has_direct_edge_line_observation(know, prev_i)
+        next_edge_has_direct_observation = has_direct_edge_line_observation(know, next_i)
 
         # `get_all_points_on_edge()` includes adjacent corners.  A corner is
         # useful as a motion reference but is not a direct measurement on the
@@ -639,7 +662,17 @@ def next_action(know: PolygonKnowledge,
             edge_vector is None
             or (know.lengths[i] is None and not has_internal_measurement)
         )
-        if should_explore_edge:
+
+        is_pose_anchor_candidate = False
+        if needs_pose_anchor and not has_internal_measurement:
+            if (prev_edge_has_direct_observation and
+                    not unit_vectors_have_same_slope(edge_vector, prev_edge_vector, 5.0)):
+                is_pose_anchor_candidate = True
+            elif (next_edge_has_direct_observation and
+                    not unit_vectors_have_same_slope(edge_vector, next_edge_vector, 5.0)):
+                is_pose_anchor_candidate = True
+
+        if should_explore_edge or is_pose_anchor_candidate:
             if not rck_rearranged:
                 # when there is no matching indices found b/w rck and rpk, 
                 # since prior knowledge cannot be used, the default action is 
@@ -653,7 +686,10 @@ def next_action(know: PolygonKnowledge,
                     break
             else:
                 # condition such as if edges are known to be parallel, then it is also explorable could go here
-                if prev_edge_vector is not None and len(points_on_prev_edge) > 0:
+                if is_pose_anchor_candidate:
+                    edges_available_to_explore.append(i)
+                    pose_anchor_candidates.add(i)
+                elif prev_edge_vector is not None and len(points_on_prev_edge) > 0:
                     edges_available_to_explore.append(i)
                 elif next_edge_vector is not None and len(points_on_next_edge) > 0:
                     edges_available_to_explore.append(i)
@@ -669,25 +705,58 @@ def next_action(know: PolygonKnowledge,
         print("No edges available to explore based on current knowledge.")
         return None, None
     else:
-        # create a copy of know and see getting two points on which edge reduces dof the most
+        # Compare completed edge-exploration branches. The simulator uses GT
+        # samples for this estimate; the robot path uses the value-free
+        # symbolic relation model below and never reads GT geometry.
         best_edge_idx = edges_available_to_explore[0]
         best_dof = find_dof(know)
         
-        if in_simulation:
+        # if in_simulation:
+        if False:
 
             for edge_idx in edges_available_to_explore:
                 temp_know = copy.deepcopy(know)
-                # simulate measuring two points
                 next_edge_idx = (edge_idx + 1) % num_sides
-                internal_pts_on_edge = get_random_points_on_line(
-                    gt.corners[next_edge_idx], gt.corners[edge_idx], num_points=2) # TODO: use symbolic constraint propagation here to get dof
-                print(" Thinking... internal_pts_on_edge: ", internal_pts_on_edge)
-                temp_know.internal_points_on_edge[edge_idx] = copy.deepcopy(internal_pts_on_edge)
-                temp_know.is_reflexive_angle[edge_idx] = gt.is_reflexive_angle[edge_idx]
+                if edge_idx in pose_anchor_candidates:
+                    # Score the terminal measurement of the approach/contact
+                    # branch. One direct point, together with the known edge
+                    # vector, is sufficient to intersect the adjacent
+                    # independently observed line.
+                    internal_pts_on_edge = get_random_points_on_line(
+                        gt.corners[next_edge_idx], gt.corners[edge_idx], num_points=1)
+                    print(" Thinking... pose-anchor point on edge ", edge_idx, ": ", internal_pts_on_edge)
+                    temp_know.internal_points_on_edge[edge_idx].extend(internal_pts_on_edge)
+                else:
+                    # TODO: use symbolic constraint propagation here to get dof
+                    internal_pts_on_edge = get_random_points_on_line(
+                        gt.corners[next_edge_idx], gt.corners[edge_idx], num_points=2)
+                    print(" Thinking... internal_pts_on_edge: ", internal_pts_on_edge)
+                    temp_know.internal_points_on_edge[edge_idx] = copy.deepcopy(internal_pts_on_edge)
+                    temp_know.is_reflexive_angle[edge_idx] = gt.is_reflexive_angle[edge_idx]
                 propagate_parameters(temp_know)
-                dof_after_two_points = find_dof(temp_know)
-                if dof_after_two_points < best_dof:
-                    best_dof = dof_after_two_points
+                dof_after_measurement = find_dof(temp_know)
+                if dof_after_measurement < best_dof:
+                    best_dof = dof_after_measurement
+                    best_edge_idx = edge_idx
+        else:
+            symbolic_knowledge = symbolic_from_polygon_knowledge(know)
+            propagate_symbolic(symbolic_knowledge)
+            best_dof = symbolic_dof(symbolic_knowledge)
+
+            for edge_idx in edges_available_to_explore:
+                predicted_knowledge = predict_edge_exploration(
+                    symbolic_knowledge,
+                    edge_idx,
+                )
+                dof_after_measurement = symbolic_dof(predicted_knowledge)
+                logger.info(
+                    "Symbolic edge-exploration score for edge %s: DOF %s -> %s",
+                    edge_idx,
+                    best_dof,
+                    dof_after_measurement,
+                )
+                if dof_after_measurement < best_dof:
+                    best_dof = dof_after_measurement
                     best_edge_idx = edge_idx
 
     # find best action spec and the reference edge

@@ -384,7 +384,7 @@ def simulate_robot(to_plot: bool = False,
             else:
                 first_edge_gt, second_edge_gt = prev_edge_idx_in_gt, edge_idx_in_gt
                 edge_in_rck = prev_edge_idx
-                dihedral_source = second_edge_gt
+                dihedral_source = first_edge_gt
             dihedral_angle = gt.dihedrals[dihedral_source]
             rck.dihedrals[edge_in_rck] = gt.dihedrals[dihedral_source]
             
@@ -562,7 +562,7 @@ if __name__ == "__main__":
     simulate_robot(
         to_plot=False, 
         polygon_knowledge_gt=poly_know_gt,
-        degree_of_prior_knowledge=0,
+        degree_of_prior_knowledge=5,
         scenario_id=2,
         shift_in_idx_for_rck=1,
         step_limit=40,

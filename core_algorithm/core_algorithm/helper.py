@@ -356,6 +356,20 @@ def edge_unit_vector_and_atleast_one_point_known(know: PolygonKnowledge,
     return True
 
 
+def has_direct_edge_line_observation(know: PolygonKnowledge,
+                                     edge_idx: int) -> bool:
+    """Return whether an edge has a vector and at least one measured internal point.
+
+    Unlike ``get_all_points_on_edge()``, this deliberately excludes inferred
+    corner coordinates. It is used when the policy needs an independently
+    observed line to anchor the polygon's global translation.
+    """
+    return (
+        know.edge_unit_vectors[edge_idx] is not None
+        and len(know.internal_points_on_edge[edge_idx]) > 0
+    )
+
+
 def action_spec_from_action(action: ActionType) -> Optional[ActionSpec]:
     """
     Retrieve the ActionSpec corresponding to a given action.
