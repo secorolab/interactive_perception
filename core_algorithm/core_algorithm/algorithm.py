@@ -629,10 +629,16 @@ def next_action(know: PolygonKnowledge,
         points_on_prev_edge = know.get_all_points_on_edge(prev_i)
         points_on_next_edge = know.get_all_points_on_edge(next_i)
 
-        # `get_all_points_on_edge()` includes adjacent corners. A known head
-        # corner alone is a motion reference, but does not determine this
-        # edge's length or make the edge fully explored.
-        should_explore_edge = edge_vector is None or know.lengths[i] is None
+        # `get_all_points_on_edge()` includes adjacent corners.  A corner is
+        # useful as a motion reference but is not a direct measurement on the
+        # edge.  Conversely, once an edge vector has been estimated from real
+        # internal samples, its unresolved length is expected to be resolved
+        # by exploring an adjacent edge and propagating the shared corner.
+        has_internal_measurement = bool(know.internal_points_on_edge[i])
+        should_explore_edge = (
+            edge_vector is None
+            or (know.lengths[i] is None and not has_internal_measurement)
+        )
         if should_explore_edge:
             if not rck_rearranged:
                 # when there is no matching indices found b/w rck and rpk, 

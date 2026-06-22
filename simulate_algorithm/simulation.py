@@ -76,6 +76,7 @@ def feasible_bounded_lengths(edge_unit_vectors: list,
 
 def generate_prior_knowledge_from_gt(gt: PolygonKnowledge,
                                      degree_of_prior_knowledge: int,
+                                     scenario_id: int = 1,
                                      percentage_of_edge_filled: float = 0.6,
                                      random_seed: int = 42) -> PolygonKnowledge:
     """
@@ -89,6 +90,7 @@ def generate_prior_knowledge_from_gt(gt: PolygonKnowledge,
         - 3: random features (controlled by percentage_of_edge_filled)
         - 4: full knowledge
         - 5: custom partial prior knowledge
+    :param scenario_id: ID for custom partial prior knowledge scenarios (only used if degree_of_prior_knowledge=5)
     :param percentage_of_edge_filled: Percentage of edges with features (between 0 and 1)
     :param random_seed: Random seed for reproducibility
     :return: Robot prior knowledge (rpk)
@@ -137,15 +139,25 @@ def generate_prior_knowledge_from_gt(gt: PolygonKnowledge,
             rpk.lengths[i] = gt.lengths[i]
     elif degree_of_prior_knowledge == 5:
         # Partial prior for pattern-matching, propagation, and DOF selection demo.
-        rpk.corner_angles = list(gt.corner_angles)
-
-        rpk.dihedrals[1] = gt.dihedrals[1]
-        rpk.dihedrals[5] = gt.dihedrals[5]
-
-        rpk.lengths[0] = gt.lengths[0]
-        rpk.corners[0] = gt.corners[0]
+        
+        # scenario1: pattern-matching and propagation demo
+        if scenario_id == 1:
+            rpk.corner_angles = list(gt.corner_angles)
+            rpk.dihedrals[1] = gt.dihedrals[1]
+            rpk.dihedrals[5] = gt.dihedrals[5]
+            rpk.lengths[0] = gt.lengths[0]
+            rpk.corners[0] = gt.corners[0]
+        
+        # scenario2: action selection
+        if scenario_id == 2:
+            rpk.is_reflexive_angle = list(gt.is_reflexive_angle)
+            for i in (1, 3, 4, 7):
+                rpk.corner_angles[i] = gt.corner_angles[i]
+            for i in (1, 3, 4, 5, 6, 7):
+                rpk.dihedrals[i] = gt.dihedrals[i]
+            rpk.corners[6] = gt.corners[6]
     else:
-        raise ValueError("degree_of_prior_knowledge must be 0, 1, 2, 3, or 4")
+        raise ValueError("degree_of_prior_knowledge must be 0, 1, 2, 3, 4, or 5")
     return rpk
 
 
@@ -195,6 +207,7 @@ def generate_polygon(n_sides: int, angles_deg: list[float], random_seed: int = 4
 
 def simulate_robot(to_plot: bool = False, 
                    degree_of_prior_knowledge: int = 0,
+                   scenario_id: int = 1,
                    polygon_knowledge_gt: PolygonKnowledge | None = None,
                    shift_in_idx_for_rck: int = 1,
                    step_limit: int = 20,
@@ -205,7 +218,8 @@ def simulate_robot(to_plot: bool = False,
     Run interactive simulation of robot reconstructing a polygon.
     
     :param to_plot: Whether to plot polygon at various stages
-    :param degree_of_prior_knowledge: Level of prior knowledge (0-4)
+    :param degree_of_prior_knowledge: Level of prior knowledge (0-5)
+    :param scenario_id: ID for custom partial prior knowledge scenarios (only used if degree_of_prior_knowledge=5)
     :param polygon_knowledge_gt: Ground truth polygon; if None, default pentagon created
     :param shift_in_idx_for_rck: Index shift for rck initialization
     :param step_limit: Maximum number of steps for simulation
@@ -264,9 +278,10 @@ def simulate_robot(to_plot: bool = False,
 
     # Generate robot prior knowledge
     rpk = generate_prior_knowledge_from_gt(gt, 
-                                           degree_of_prior_knowledge=degree_of_prior_knowledge, 
-                                           percentage_of_edge_filled=percentage_of_edge_filled, 
-                                           random_seed=random_seed)
+                                            degree_of_prior_knowledge=degree_of_prior_knowledge,
+                                            scenario_id=scenario_id,
+                                            percentage_of_edge_filled=percentage_of_edge_filled, 
+                                            random_seed=random_seed)
     rpk.print_knowledge("Robot Prior Knowledge (rpk) [Before propagation]")
 
     propagate_parameters(rpk)
@@ -545,9 +560,10 @@ if __name__ == "__main__":
     poly_know_gt.print_knowledge("Ground truth polygon knowledge")
     
     simulate_robot(
-        to_plot=True, 
+        to_plot=False, 
         polygon_knowledge_gt=poly_know_gt,
-        degree_of_prior_knowledge=5,
+        degree_of_prior_knowledge=0,
+        scenario_id=2,
         shift_in_idx_for_rck=1,
         step_limit=40,
         percentage_of_edge_filled=1.0,
