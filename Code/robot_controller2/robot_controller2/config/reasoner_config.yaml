@@ -3,7 +3,7 @@
 # Experiment and polygon settings
 experiment:
   id: 4
-  n_sides: 4
+  n_sides: 8
 
 # Knowledge propagation parameters
 knowledge_propagation:
@@ -19,7 +19,7 @@ motion:
   offset_below_surface: 0.025
   touch_velocity: 0.03
   slide_velocity: 0.05
-  slide_offset_from_edge: 0.05
+  slide_offset_from_edge: 0.08
   offset_from_edge_while_moving_from_outside_to_edge: 0.04
   force_against_surface: 30.0
   force_along_edge_to_find_slope: 15.0

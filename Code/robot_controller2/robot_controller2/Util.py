@@ -884,7 +884,9 @@ def make_action_goal_slide(position=[None, None, None],
 
     elif action_name == "slide_against_edge_until_corner":
         """
-        disjunction 1 (against edge)    : reflexive corner or next edge might have 90 degree dihedral
+        disjunction 1 (against edge)    : reflexive corner or 
+                                          next edge might have 90 degree dihedral and thus non-reflexive or 
+                                          even 270 dih and non-reflexive corner when limited by reachable workspace
         disjunction 2 (against edge)    : non-reflexive corner
         """
         
@@ -997,7 +999,7 @@ def make_action_goal_slide(position=[None, None, None],
                 "disjunction_id": 1,
                 "position": 4,
                 "type": "TIME_LIMIT",
-                "value": 2.0,
+                "value": 5.0,
                 "operator": gt
             })
 
@@ -1015,7 +1017,7 @@ def make_action_goal_slide(position=[None, None, None],
                 "disjunction_id": 2,
                 "position": 5,
                 "type": "POSITION_XYZ",
-                "value": [None, None, 0.0],
+                "value": [None, None, -0.005],
                 "operator": [None, None, lt]
             })
         

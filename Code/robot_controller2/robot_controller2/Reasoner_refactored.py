@@ -809,6 +809,8 @@ class ReasonerNode(ROSNode):
                     self.stop_execution = True
                     return
                 
+                print(f"Final direction of sliding motion (2D): {self.dir_of_sliding_motion_2d}")
+                
                 # get orientation of new marker frame, where x axis is along the direction of sliding motion and z axis is same as base_link frame (assuming planar surface)
                 edge_orientation = Util.get_quat_of_align_frame_to_edge(self.plane_orientation, self.dir_of_sliding_motion_2d)
                 self.create_and_publish_marker_pose(
@@ -1705,7 +1707,7 @@ class ReasonerNode(ROSNode):
                 point_on_plane = (point_on_edge[0] + perp_direction[0]*self.slide_offset_from_edge, point_on_edge[1] + perp_direction[1]*self.slide_offset_from_edge)
                 
                 point_further_away_in_dir_of_edge = (point_on_plane[0] + edge_uv[0]*0.15, point_on_plane[1] + edge_uv[1]*0.15) # point on plane further away from edge in direction of edge unit vector
-                point_to_traverse_in_opp_direction = (point_further_away_in_dir_of_edge[0] + opp_to_perp_direction[0]*0.15, point_further_away_in_dir_of_edge[1] + opp_to_perp_direction[1]*0.15) # point on plane with offset to best_edge
+                point_to_traverse_in_opp_direction = (point_further_away_in_dir_of_edge[0] + opp_to_perp_direction[0]*0.20, point_further_away_in_dir_of_edge[1] + opp_to_perp_direction[1]*0.20) # point on plane with offset to best_edge
                     
                 
                 self.desired_orientation, desired_yaw = Util.resolve_orientation(dir_of_motion=edge_uv_ck, orientation_input=self.orientation_input)
@@ -1717,22 +1719,28 @@ class ReasonerNode(ROSNode):
                     ## case 1: prev: slide until corner and reflexive and dihedral is 90/unknown
                     ## case 2: prev: slide against vertical until corner, and dihedral is 270
                     ## case 3: when a corner of best edge is known, and arm is not at adjacent edge
+                    
+                    # move above surface
                     Util.make_action_goal_move(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
                                                 orientation = self.current_orientation, 
                                                 frame_name="marker_frame_0"),
                     
+                    # move with an offset from edge
+                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
+                                                orientation = self.current_orientation,
+                                                frame_name="marker_frame_0"),
+
                     # attain desired yaw
-                    Util.make_action_goal_yaw(position=[self.current_position[0], self.current_position[1], self.offset_above_surface], 
+                    Util.make_action_goal_yaw(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
                                                 yaw = desired_yaw,
                                                 frame_name="marker_frame_0"),
 
-                    # move to a point offset from edge to slide parallel to edge
-                    Util.make_action_goal_move(position=[point_on_plane[0], point_on_plane[1], self.offset_above_surface], 
-                                                orientation = self.desired_orientation,
-                                                frame_name="marker_frame_0"),
+                    # move along the edge in the direction opposite to the final slide
                     Util.make_action_goal_move(position=[point_further_away_in_dir_of_edge[0], point_further_away_in_dir_of_edge[1], self.offset_above_surface], 
                                                 orientation = self.desired_orientation,
                                                 frame_name="marker_frame_0"),
+                    
+                    # move to other side of edge to get point
                     Util.make_action_goal_move(position=[point_to_traverse_in_opp_direction[0], point_to_traverse_in_opp_direction[1], self.offset_above_surface], 
                                                 orientation = self.desired_orientation,
                                                 frame_name="marker_frame_0"),
@@ -1814,7 +1822,8 @@ class ReasonerNode(ROSNode):
                     self.current_marker_frame_name = "marker_frame_0"
                     return action_list
                 
-                elif self.prev_action_spec.stop == Stop.UNTIL_EDGE_CONTACT:
+                elif self.prev_action_spec.stop in (Stop.UNTIL_EDGE_CONTACT,
+                                                    Stop.UNTIL_EDGE_CONTACT_WITHIN_RANGE):
                     # case 2: if prev action was slide until edge and if dihedral is 270, then move back to get point: dir doesn't matter. ref-edge is edge to contact
                     # get perpendicular dir vector to edge_uv
                     edge_uv = self.rck.edge_unit_vectors[self.current_ref_edge_index]
@@ -2104,7 +2113,7 @@ class ReasonerNode(ROSNode):
                     self.get_logger().info(f"Updated edge unit vector for edge {self.current_ref_edge_index} to {self.rck.edge_unit_vectors[self.current_ref_edge_index]} based on sliding motion against vertical surface")
                     if disjunction_id_for_edge_reflexive in result.disjunction_indices:
                         # do nothing because, it might be due to a reflexive corner or due to the contact with the next edge's perpendicular surface
-                        rclpy.logging.get_logger("Reasoner").info(f"Result of action {self.current_action_type.name} is consistent with reflexive angle type for edge {edge_idx_of_interest_reflexivity}. Not updating angle type since it might be due to contact with next edge's perpendicular surface rather than reflexivity.")
+                        rclpy.logging.get_logger("Reasoner").info(f"Result of action {self.current_action_type.name} is consistent with reflexive angle type for edge {edge_idx_of_interest_reflexivity}. Not updating angle type since it might be due to contact with next edge's perpendicular surface rather than reflexivity Or with dih=270 with non-reflexivity due to workspace limit.")
                         pass
                     elif disjunction_id_for_edge_non_reflexive in result.disjunction_indices:
                         self.rck.is_reflexive_angle[edge_idx_of_interest_reflexivity] = False
