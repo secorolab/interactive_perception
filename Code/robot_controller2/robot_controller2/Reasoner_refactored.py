@@ -12,6 +12,10 @@ from typing import Literal
 import json
 import ast
 import traceback
+import hashlib
+import platform
+import subprocess
+import sys
 from datetime import datetime
 from scipy.spatial.transform import Rotation as R
 
@@ -42,6 +46,7 @@ from core_algorithm import (
     propagate_parameters,
     find_unique_pattern,
     get_unique_pattern_ref_index,
+    get_last_action_selection_trace,
     find_dof,
     rearrange_rck_using_prior_knowledge,
     fill_missing_parameters,
@@ -369,6 +374,8 @@ class ReasonerNode(ROSNode):
         self.rck_rearranged = False
         self.execution_start_time = datetime.now().astimezone()
         self.execution_end_time = None
+        self.config_source_path = None
+        self.initial_end_effector_pose = None
         self.final_rck_saved = False
         self.dof = None
         self.stop_execution = False
@@ -404,9 +411,22 @@ class ReasonerNode(ROSNode):
         fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
         self._propagate_knowledge(knowledge="rck")
         self.dof = find_dof(self.rck)
+        self.initial_current_knowledge_sha256 = hashlib.sha256(
+            json.dumps(self._json_safe(self._knowledge_snapshot()), sort_keys=True).encode("utf-8")
+        ).hexdigest()
         self.step_count = 0
         self.completed_action_type_count = 0
         self.completed_action_type_instances = []
+        # Structured execution trace.  This deliberately stores action and
+        # primitive metadata plus compact knowledge deltas; high-rate sensor
+        # streams are not duplicated in the RCK JSON file.
+        self.current_action_log = None
+        self.current_selection_metadata = None
+        self.last_guard_diagnostic = None
+        self.knowledge_stage_trace = []
+        self.active_primitive_log = None
+        self.bootstrap_action_instances = []
+        self.failed_action_instances = []
         self.current_action_type_completion_recorded = False
         self.current_action_type_start_time = None
         self.current_action_type_start_distance_m = None
@@ -440,6 +460,7 @@ class ReasonerNode(ROSNode):
         self.offset_above_surface = self.config['motion']['offset_above_surface']
         self.offset_below_surface = self.config['motion']['offset_below_surface']
         self.diameter_of_end_effector = self.config['motion']['diameter_of_end_effector']
+        self.offset_due_to_camera = self.config["motion"].get("offset_due_to_camera", 0.0)
         self.offset_from_edge_while_sliding_against_vertical_surface = self.config['motion'].get(
             'offset_from_edge_while_sliding_against_vertical_surface',
             0.0
@@ -539,6 +560,7 @@ class ReasonerNode(ROSNode):
                 try:
                     with open(config_path, 'r') as f:
                         config = yaml.safe_load(f)
+                    self.config_source_path = os.path.abspath(config_path)
                     self.get_logger().info(f"Loaded configuration from {config_path}")
                     return config
                 except Exception as e:
@@ -610,9 +632,13 @@ class ReasonerNode(ROSNode):
                 "current_ref_edge_index": self.current_ref_edge_index,
                 "snapshot_label": snapshot_label,
                 "rck_save_mode": self.rck_save_mode,
+                "logging_schema_version": 2,
+                "reproducibility": self._execution_reproducibility_metadata(),
                 "motion_primitives": {
                     "completed_action_type_count": self.completed_action_type_count,
                     "action_type_instances": self.completed_action_type_instances,
+                    "bootstrap_instances": self.bootstrap_action_instances,
+                    "failed_instances": self.failed_action_instances,
                 },
                 "end_effector_distance": {
                     "total_distance_m": self.ee_distance_total_m,
@@ -666,6 +692,365 @@ class ReasonerNode(ROSNode):
         self.current_action_type_start_time = datetime.now().astimezone()
         self.current_action_type_start_distance_m = self.ee_distance_total_m
         self.current_action_type_start_sample_count = self.ee_distance_sample_count
+        self.current_action_log = {
+            "instance_index": len(self.completed_action_type_instances) + 1,
+            "action_type": self.current_action_type.name if self.current_action_type else None,
+            "ref_edge_index_before_reindex": (
+                int(self.current_ref_edge_index)
+                if self.current_ref_edge_index is not None else None
+            ),
+            "ref_edge_index": (
+                int(self.current_ref_edge_index)
+                if self.current_ref_edge_index is not None else None
+            ),
+            "ref_edge_index_after_reindex": None,
+            "action_spec": self._action_spec_to_json(self.current_action_spec),
+            "selection_provenance": self._json_safe(self.current_selection_metadata),
+            "rck_rearranged_at_start": bool(self.rck_rearranged),
+            "dof_before": self.dof,
+            "knowledge_before": self._knowledge_snapshot(),
+            "primitives": [],
+            "fit_diagnostics": [],
+            "knowledge_stage_trace": [],
+            "knowledge_update_provenance": [],
+            "knowledge_updates_before_reindex": [],
+            "knowledge_updates_after_reindex": [],
+            "reindex": None,
+        }
+
+    @staticmethod
+    def _json_safe(value):
+        """Convert numpy/enumeration values to values accepted by ``json``."""
+        if isinstance(value, np.ndarray):
+            return [ReasonerNode._json_safe(v) for v in value.tolist()]
+        if isinstance(value, (np.integer,)):
+            return int(value)
+        if isinstance(value, (np.floating,)):
+            return float(value)
+        if isinstance(value, Enum):
+            return value.name
+        if isinstance(value, dict):
+            return {str(k): ReasonerNode._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [ReasonerNode._json_safe(v) for v in value]
+        return value
+
+    def _knowledge_snapshot_for(self, knowledge):
+        """Return a compact, index-preserving snapshot of polygon knowledge."""
+        fields = (
+            "slopes", "lengths", "edge_unit_vectors", "corners",
+            "is_reflexive_angle", "corner_angles", "dihedrals",
+            "internal_points_on_edge",
+        )
+        return {
+            "n_sides": int(knowledge.n_sides),
+            **{field: self._json_safe(copy.deepcopy(getattr(knowledge, field)))
+               for field in fields},
+        }
+
+    def _knowledge_snapshot(self):
+        """Return a compact, index-preserving snapshot of the current RCK."""
+        return self._knowledge_snapshot_for(self.rck)
+
+    @staticmethod
+    def _knowledge_diff(before, after):
+        """Describe changed indexed attributes without storing duplicate states."""
+        changes = []
+        if not before or not after:
+            return changes
+        for field in before:
+            if field == "n_sides" or field not in after:
+                continue
+            old_values = before[field]
+            new_values = after[field]
+            if not isinstance(old_values, list) or not isinstance(new_values, list):
+                if old_values != new_values:
+                    changes.append({"field": field, "before": old_values, "after": new_values})
+                continue
+            for index, (old, new) in enumerate(zip(old_values, new_values)):
+                if old != new:
+                    changes.append({
+                        "field": field,
+                        "index": index,
+                        "before": old,
+                        "after": new,
+                    })
+        return changes
+
+    @staticmethod
+    def _action_spec_to_json(action_spec):
+        if action_spec is None:
+            return None
+        return {
+            "direction": getattr(action_spec.direction, "name", str(action_spec.direction)),
+            "mode": getattr(action_spec.mode, "name", str(action_spec.mode)),
+            "stop": getattr(action_spec.stop, "name", str(action_spec.stop)),
+        }
+
+    def _ensure_action_log(self):
+        """Create a trace record for bootstrap actions with no ActionType yet."""
+        if self.current_action_log is None:
+            self._start_action_type_instance()
+
+    def _begin_primitive_log(self, motion_specification, ms_json):
+        self._ensure_action_log()
+        arm_name = ms_json.get("arm_name")
+        arm_spec = ms_json.get(arm_name, {}) if arm_name else {}
+        action_name = arm_spec.get("action_name")
+        if isinstance(action_name, str):
+            primitive_family = (
+                "slide" if action_name.startswith("slide") or action_name.startswith("find_edge")
+                else "touch" if action_name.startswith("touch")
+                else "move" if action_name.startswith("move")
+                else "yaw" if action_name.startswith("yaw")
+                else action_name
+            )
+        else:
+            primitive_family = None
+        primitive = {
+            "primitive_index": len(self.current_action_log["primitives"]) + 1,
+            "family": primitive_family,
+            "action_name": action_name,
+            "reference_edge_before_reindex": self.current_action_log.get(
+                "ref_edge_index_before_reindex"
+            ),
+            "reference_edge": (
+                int(self.current_ref_edge_index)
+                if self.current_ref_edge_index is not None else None
+            ),
+            "frame_name": arm_spec.get("frame_name"),
+            "start_time": datetime.now().astimezone().isoformat(),
+            "start_sample_count": self.ee_distance_sample_count,
+            "knowledge_before": self._knowledge_snapshot(),
+            "knowledge_updates_before_reindex": [],
+            "knowledge_updates_after_reindex": [],
+            "reference_edge_after_reindex": None,
+            "rck_rearranged_at_start": bool(self.rck_rearranged),
+            "terminal_outcome": None,
+            "guard_observation": None,
+            "status": "running",
+        }
+        self.current_action_log["primitives"].append(primitive)
+        self.active_primitive_log = primitive
+
+    def _finish_primitive_log(self, status, result=None, error=None):
+        primitive = self.active_primitive_log
+        if primitive is None:
+            return
+        primitive["end_time"] = datetime.now().astimezone().isoformat()
+        primitive["end_sample_count"] = self.ee_distance_sample_count
+        primitive["status"] = status
+        primitive["duration_seconds"] = (
+            datetime.fromisoformat(primitive["end_time"]) -
+            datetime.fromisoformat(primitive["start_time"])
+        ).total_seconds()
+        primitive["distance_start_m"] = self.current_action_type_start_distance_m
+        primitive["distance_end_m"] = self.ee_distance_total_m
+        if self.current_action_type_start_distance_m is not None:
+            primitive["distance_from_action_start_m"] = max(
+                0.0, self.ee_distance_total_m - self.current_action_type_start_distance_m
+            )
+        if result is not None:
+            primitive["disjunction_indices"] = self._json_safe(
+                list(getattr(result, "disjunction_indices", []) or [])
+            )
+            primitive["result_action_name"] = getattr(result, "ms_action_name", None)
+        if self.last_guard_diagnostic is not None:
+            primitive["terminal_outcome"] = self._json_safe(self.last_guard_diagnostic)
+            primitive["guard_observation"] = self._json_safe(self.last_guard_diagnostic)
+        if self.current_action_log is not None:
+            primitive["fit_diagnostics"] = self._json_safe(
+                self.current_action_log.get("fit_diagnostics", [])
+            )
+        if error is not None:
+            primitive["error"] = str(error)
+        primitive["knowledge_after"] = self._knowledge_snapshot()
+        primitive["rck_rearranged_at_end"] = bool(self.rck_rearranged)
+        self.active_primitive_log = None
+
+        # Direct evidence is committed inside ``on_action_succeeded`` before
+        # this callback returns. Capture it after the primitive has completed.
+        if self.current_action_log is not None:
+            if self.current_action_type_completion_recorded:
+                if "knowledge_before_reindex" not in self.current_action_log:
+                    self._capture_action_updates("before_reindex")
+            elif (
+                self.current_action_type is None
+                and self.next_action_idx >= self.length_action_list
+                and self.current_action_log not in self.bootstrap_action_instances
+            ):
+                self.current_action_log.update({
+                    "action_type": "BOOTSTRAP",
+                    "end_time": primitive.get("end_time"),
+                    "status": status,
+                })
+                self.bootstrap_action_instances.append(self.current_action_log)
+            elif (
+                status != "succeeded"
+                and self.current_action_log not in self.completed_action_type_instances
+                and self.current_action_log not in self.failed_action_instances
+            ):
+                self.current_action_log.update({
+                    "end_time": primitive.get("end_time"),
+                    "status": status,
+                })
+                self.failed_action_instances.append(self.current_action_log)
+
+    @staticmethod
+    def _terminal_outcome_metadata(result):
+        """Map controller disjunction IDs to compact semantic guard labels."""
+        if result is None:
+            return None
+        action_name = getattr(result, "ms_action_name", None)
+        disjunctions = [int(value) for value in (getattr(result, "disjunction_indices", []) or [])]
+        labels = {
+            "slide_against_vertical_surface_until_corner": {
+                1: "convex_90_transition",
+                2: "convex_270_transition",
+                3: "reflex_transition",
+            },
+            "slide_against_edge_until_corner": {
+                1: "ambiguous_or_reflex_transition",
+                2: "non_reflex_transition",
+            },
+            "slide_until_edge": {
+                1: "adjacent_face_contact",
+                2: "outer_edge_transition",
+                3: "bounded_no_edge",
+            },
+            "find_edge_by_sliding": {
+                1: "adjacent_face_contact",
+                2: "outer_edge_transition",
+                3: "bounded_no_edge",
+            },
+        }.get(action_name, {})
+        return {
+            "action_name": action_name,
+            "disjunction_indices": disjunctions,
+            "semantic_labels": [labels.get(index, f"disjunction_{index}") for index in disjunctions],
+        }
+
+    def _record_knowledge_stage(self, stage):
+        """Store compact provenance checkpoints without raw sensor streams."""
+        if self.current_action_log is None:
+            return
+        entry = {
+            "stage": stage,
+            "time": datetime.now().astimezone().isoformat(),
+            "knowledge": self._knowledge_snapshot(),
+            "dof": find_dof(self.rck),
+        }
+        self.current_action_log.setdefault("knowledge_stage_trace", []).append(entry)
+        self.knowledge_stage_trace.append(entry)
+
+    def _record_fit_diagnostics(self, fit_type, points, *, direction=None, origin=None, orientation=None):
+        """Record fit quality statistics while discarding the raw trajectory."""
+        if self.current_action_log is None or points is None:
+            return
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or len(pts) == 0:
+            return
+        record = {"fit_type": fit_type, "sample_count": int(len(pts))}
+        if direction is not None and len(pts) >= 2:
+            xy = pts[:, :2]
+            d = np.asarray(direction, dtype=float)[:2]
+            norm = float(np.linalg.norm(d))
+            if norm > 1e-12:
+                d /= norm
+                center = np.mean(xy, axis=0)
+                residuals = np.abs((xy - center)[:, 0] * d[1] - (xy - center)[:, 1] * d[0])
+                record.update({
+                    "inlier_count_estimate": int(np.count_nonzero(residuals <= 0.0015)),
+                    "residual_rms_m": float(np.sqrt(np.mean(residuals ** 2))),
+                    "residual_mean_m": float(np.mean(residuals)),
+                    "residual_max_m": float(np.max(residuals)),
+                })
+        if origin is not None and orientation is not None and len(pts) >= 3:
+            normal = R.from_quat(orientation).as_matrix()[:, 2]
+            distances = np.abs((pts[:, :3] - np.asarray(origin, dtype=float)) @ normal)
+            record.update({
+                "inlier_count_estimate": int(np.count_nonzero(distances <= 0.005)),
+                "residual_rms_m": float(np.sqrt(np.mean(distances ** 2))),
+                "residual_mean_m": float(np.mean(distances)),
+                "residual_max_m": float(np.max(distances)),
+            })
+        self.current_action_log.setdefault("fit_diagnostics", []).append(record)
+
+    def _capture_action_updates(self, phase):
+        """Capture attribute changes and index state at a reasoning boundary."""
+        if self.current_action_log is None:
+            return
+        current = self._knowledge_snapshot()
+        self.current_action_log["knowledge_after"] = current
+        self.current_action_log["dof_after"] = find_dof(self.rck)
+        self.current_action_log.setdefault("knowledge_update_provenance", []).append({
+            "phase": phase,
+            "source": (
+                "action_conditioned_terminal_evidence"
+                if phase == "before_reindex"
+                else "geometric_propagation_and_prior_alignment"
+            ),
+            "terminal_outcome": self._json_safe(self.last_guard_diagnostic),
+            "update_count": 0,
+        })
+        if phase == "before_reindex":
+            updates = self._knowledge_diff(
+                self.current_action_log["knowledge_before"], current
+            )
+            self.current_action_log["knowledge_before_reindex"] = current
+            self.current_action_log["knowledge_updates_before_reindex"] = updates
+            self.current_action_log["knowledge_update_provenance"][-1]["update_count"] = len(updates)
+            if self.current_action_log.get("primitives"):
+                self.current_action_log["primitives"][-1]["knowledge_updates_before_reindex"] = updates
+        elif phase == "after_reindex":
+            prior = self.current_action_log.get("knowledge_before_reindex", self.current_action_log["knowledge_before"])
+            updates = self._knowledge_diff(prior, current)
+            self.current_action_log["knowledge_after_reindex"] = current
+            self.current_action_log["knowledge_updates_after_reindex"] = updates
+            self.current_action_log["knowledge_update_provenance"][-1]["update_count"] = len(updates)
+            if self.current_action_log.get("primitives"):
+                self.current_action_log["primitives"][-1]["knowledge_updates_after_reindex"] = updates
+            self.current_action_log["ref_edge_index_after_reindex"] = (
+                int(self.current_ref_edge_index)
+                if self.current_ref_edge_index is not None else None
+            )
+            for primitive in self.current_action_log.get("primitives", []):
+                primitive["reference_edge_after_reindex"] = (
+                    int(self.current_ref_edge_index)
+                    if self.current_ref_edge_index is not None else None
+                )
+                primitive["rck_rearranged_after_action"] = True
+
+    def _execution_reproducibility_metadata(self):
+        config_bytes = json.dumps(self.config, sort_keys=True, default=str).encode("utf-8")
+        prior_bytes = json.dumps(self._json_safe(self._knowledge_snapshot_for(self.rpk)), sort_keys=True).encode("utf-8")
+        try:
+            git_commit = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=os.path.dirname(__file__), capture_output=True, text=True,
+                timeout=1, check=False,
+            ).stdout.strip() or None
+        except Exception:
+            git_commit = None
+        return {
+            "run_id": self.execution_start_time.strftime("%Y%m%dT%H%M%S%f%z"),
+            "software_git_commit": git_commit,
+            "source_file": os.path.abspath(__file__),
+            "python_version": sys.version.split()[0],
+            "platform": platform.platform(),
+            "config_source_path": self.config_source_path,
+            "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+            "prior_knowledge_sha256": hashlib.sha256(prior_bytes).hexdigest(),
+            "initial_current_knowledge_sha256": self.initial_current_knowledge_sha256,
+            "random_seed": self.config.get("experiment", {}).get("random_seed"),
+            "initial_end_effector_pose": self.initial_end_effector_pose,
+            "hardware": self.config.get("hardware", {}),
+            "experiment_id": self.experiment_id,
+            "n_sides": self.n_sides,
+            "frames": self.config.get("frames", {}),
+            "motion_parameters": self.config.get("motion", {}),
+            "knowledge_propagation": self.config.get("knowledge_propagation", {}),
+        }
 
     def _record_completed_action_type(self):
         """
@@ -691,13 +1076,18 @@ class ReasonerNode(ROSNode):
         )
         distance_traversed_m = max(0.0, self.ee_distance_total_m - start_distance_m)
         self.completed_action_type_count += 1
-        self.completed_action_type_instances.append({
+        action_record = self.current_action_log or {
+            "instance_index": self.completed_action_type_count,
+            "action_type": action_type_name,
+            "primitives": [],
+            "knowledge_before": self._knowledge_snapshot(),
+        }
+        action_record.update({
             "instance_index": self.completed_action_type_count,
             "action_type": action_type_name,
             "ref_edge_index": (
                 int(self.current_ref_edge_index)
-                if self.current_ref_edge_index is not None
-                else None
+                if self.current_ref_edge_index is not None else None
             ),
             "start_time": (
                 self.current_action_type_start_time.isoformat()
@@ -713,6 +1103,10 @@ class ReasonerNode(ROSNode):
             "start_sample_count": self.current_action_type_start_sample_count,
             "end_sample_count": self.ee_distance_sample_count,
         })
+        if self.current_action_log is None:
+            self.current_action_log = action_record
+        if action_record not in self.completed_action_type_instances:
+            self.completed_action_type_instances.append(action_record)
         self.current_action_type_completion_recorded = True
         self.get_logger().info(
             f"Completed action type {action_type_name}; distance traversed: "
@@ -1147,6 +1541,7 @@ class ReasonerNode(ROSNode):
                             validate_individual_match_across_fields=self.validate_individual_match_across_fields)
                 
                 if self.rpk_rck_matching_idx_found and not self.rck_rearranged:
+                    self._capture_action_updates("before_reindex")
                     rearrange_rck_using_prior_knowledge(self.rck, self.rpk_first_idx_in_rck)
                     self.marker_id_for_edges[:] = self.marker_id_for_edges[self.rpk_first_idx_in_rck:] + self.marker_id_for_edges[:self.rpk_first_idx_in_rck] # rearrange marker ids in the same way as rck
                     self.noisy_points_on_edge[:] = self.noisy_points_on_edge[self.rpk_first_idx_in_rck:] + self.noisy_points_on_edge[:self.rpk_first_idx_in_rck]
@@ -1155,6 +1550,7 @@ class ReasonerNode(ROSNode):
                     fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
                     self._propagate_knowledge(knowledge="rck")
                     self._sync_knowledge_to_graph()
+                    self._capture_action_updates("after_reindex")
                     
                 # find dof after propagation to check if exploration is complete
                 self.dof = find_dof(self.rck)
@@ -1180,6 +1576,12 @@ class ReasonerNode(ROSNode):
             self.prev_action_instance,
             edge_index=remap_edge_index(self.prev_action_instance.edge_index),
         )
+        if self.current_action_log is not None:
+            self.current_action_log["reindex"] = {
+                "shift": int(shift),
+                "reference_edge_before": self.current_action_log.get("ref_edge_index"),
+                "reference_edge_after": self.current_ref_edge_index,
+            }
     
     def _propagate_knowledge(self, knowledge: Literal["rck", "rpk"] = "rck",
                              min_points_to_remove_outliers: Optional[int] = None,
@@ -1287,7 +1689,18 @@ class ReasonerNode(ROSNode):
         
         try:
             # get next action recommendation from action selection algorithm
+            self.current_selection_metadata = {
+                "policy": "legacy-next-action",
+                "rationale": (
+                    "Selected by core_algorithm.next_action using current RCK, "
+                    "previous action, and re-index state."
+                ),
+                "plan": None,
+            }
             self.current_action_type, self.current_ref_edge_index = next_action(self.rck, self.prev_action_instance, self.rck_rearranged)
+            self.current_selection_metadata["decision"] = self._json_safe(
+                get_last_action_selection_trace()
+            )
             self.current_action_spec = ACTION_TO_SPEC[self.current_action_type] if self.current_action_type is not None else None
             if self.current_action_type is not None:
                 self._start_action_type_instance()
@@ -1909,6 +2322,7 @@ class ReasonerNode(ROSNode):
         ms_json = ast.literal_eval(motion_specification)
         arm_name = ms_json["arm_name"]
         self.current_ms_frame = ms_json[arm_name]["frame_name"]
+        self._begin_primitive_log(motion_specification, ms_json)
         
         goal_msg = MotionSpecification.Goal()
         goal_msg.motion_specification = str(motion_specification)
@@ -1961,14 +2375,27 @@ class ReasonerNode(ROSNode):
             result = future.result()
         except Exception as e:
             self.get_logger().error(f"Result failed: {e}")
+            self._finish_primitive_log("failed", error=e)
             return
 
         if result.status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info("Goal succeeded")
-            self.on_action_succeeded(result.result)
+            try:
+                self.last_guard_diagnostic = self._terminal_outcome_metadata(result.result)
+                self._record_knowledge_stage("before_action_interpretation")
+                self.on_action_succeeded(result.result)
+            finally:
+                # Knowledge updates happen inside on_action_succeeded, so the
+                # primitive record is closed afterwards and captures the
+                # post-result state without storing high-rate signals.
+                self._finish_primitive_log("succeeded", result.result)
+                self.last_guard_diagnostic = None
             self.state_of_execution = Util.StateOfExecution.COMPLETED
         else:
             self.get_logger().error(f"Goal failed with status {result.status}")
+            self.last_guard_diagnostic = self._terminal_outcome_metadata(result.result)
+            self._finish_primitive_log("failed", result=result.result)
+            self.last_guard_diagnostic = None
             self.state_of_execution = Util.StateOfExecution.FAILED
 
     def on_action_succeeded(self, result):
@@ -1993,6 +2420,12 @@ class ReasonerNode(ROSNode):
             else:
                 self.plane_slope_estimated = True
                 self.plane_origin_position, self.plane_orientation = Util.pose_from_points(points=self.points_on_plane, use_ransac=True)
+                self._record_fit_diagnostics(
+                    "plane",
+                    self.points_on_plane,
+                    origin=self.plane_origin_position,
+                    orientation=self.plane_orientation,
+                )
                 
                 self.get_logger().info(f"Estimated plane pose from points: position={self.plane_origin_position}, orientation={self.plane_orientation}")
                 self.create_and_publish_marker_pose(position=self.plane_origin_position, 
@@ -2040,6 +2473,7 @@ class ReasonerNode(ROSNode):
             
             edge_uv = Util.unit_vector_from_points_2d(points=internal_points_2d)
             print("edge uv from points: ", edge_uv)
+            self._record_fit_diagnostics("edge_trace", collected_points_2d, direction=edge_uv)
             
             # make it cck
             angle_with_direction_of_force = Util.get_ccw_angle(self.last_direction_of_motion[0:2], 
@@ -2059,9 +2493,7 @@ class ReasonerNode(ROSNode):
                     edge_uv = [-edge_uv[0], -edge_uv[1]] # invert direction to match CCK direction
                 elif angle_with_direction_of_force > math.pi:
                     self.get_logger().info("Sliding motion detected in the CCK direction")
-                vertical_surface_offset_distance = (
-                    radius_of_ee + self.offset_from_edge_while_sliding_against_vertical_surface
-                )
+                vertical_surface_offset_distance = (radius_of_ee + self.offset_due_to_camera)
                 internal_points_2d = Util.offset_points(
                     internal_points_2d,
                     edge_uv,
@@ -2120,7 +2552,9 @@ class ReasonerNode(ROSNode):
                         rclpy.logging.get_logger("Reasoner").info(f"Updated angle type of edge {edge_idx_of_interest_reflexivity} to non-reflexive based on result of action {self.current_action_type.name}")
             
             # propagate current knowledge
+            self._record_knowledge_stage("after_direct_evidence")
             self._propagate_knowledge(knowledge="rck")
+            self._record_knowledge_stage("after_geometric_propagation")
 
             # check if unique pattern is found for action selection
             self.unique_pattern_found_in_rck = find_unique_pattern(self.rck)
@@ -2142,6 +2576,7 @@ class ReasonerNode(ROSNode):
                         validate_individual_match_across_fields=self.validate_individual_match_across_fields)
             
             if self.rpk_rck_matching_idx_found and not self.rck_rearranged:
+                self._capture_action_updates("before_reindex")
                 rearrange_rck_using_prior_knowledge(self.rck, self.rpk_first_idx_in_rck)
                 self.marker_id_for_edges[:] = self.marker_id_for_edges[self.rpk_first_idx_in_rck:] + self.marker_id_for_edges[:self.rpk_first_idx_in_rck] # rearrange marker ids in the same way as rck
                 self.noisy_points_on_edge[:] = self.noisy_points_on_edge[self.rpk_first_idx_in_rck:] + self.noisy_points_on_edge[:self.rpk_first_idx_in_rck]
@@ -2149,7 +2584,9 @@ class ReasonerNode(ROSNode):
                 self.rck_rearranged = True
                 fill_missing_parameters(self.rck, self.rpk, self.rpk_rck_matching_idx_found)
                 self._propagate_knowledge(knowledge="rck")
+                self._record_knowledge_stage("after_prior_alignment_propagation")
                 self._sync_knowledge_to_graph()
+                self._capture_action_updates("after_reindex")
                 
             # find dof after propagation to check if exploration is complete
             self.dof = find_dof(self.rck)
@@ -2266,7 +2703,9 @@ class ReasonerNode(ROSNode):
                 self.get_logger().warn(f"No specific update logic for action type {self.current_action_type.name}.")
         
             # propagate knowledge based on new observations
+            self._record_knowledge_stage("after_direct_evidence")
             self._propagate_knowledge()
+            self._record_knowledge_stage("after_geometric_propagation")
             self._sync_knowledge_to_graph()
             self._save_rck_snapshot_if_configured('action_result_update')
             self.motion_indices_to_collect_points = []
@@ -2401,6 +2840,21 @@ class ReasonerNode(ROSNode):
             msg: PoseStamped message with current EE pose
         """
         
+        if self.initial_end_effector_pose is None:
+            self.initial_end_effector_pose = {
+                "frame_id": msg.header.frame_id,
+                "position": [
+                    float(msg.pose.position.x),
+                    float(msg.pose.position.y),
+                    float(msg.pose.position.z),
+                ],
+                "orientation_xyzw": [
+                    float(msg.pose.orientation.x),
+                    float(msg.pose.orientation.y),
+                    float(msg.pose.orientation.z),
+                    float(msg.pose.orientation.w),
+                ],
+            }
         self.first_state_update_received = True
         self._record_ee_distance_sample(msg)
         

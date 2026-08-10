@@ -21,6 +21,22 @@ import random
 
 logger = logging.getLogger(__name__)
 
+LAST_ACTION_SELECTION_TRACE = {}
+
+
+def get_last_action_selection_trace():
+    """Return compact provenance for the most recent legacy action selection."""
+    return copy.deepcopy(LAST_ACTION_SELECTION_TRACE)
+
+
+def _return_selected_action(action_type, reference_edge):
+    global LAST_ACTION_SELECTION_TRACE
+    LAST_ACTION_SELECTION_TRACE.update({
+        "selected_action": getattr(action_type, "name", str(action_type)),
+        "selected_reference_edge": reference_edge,
+    })
+    return action_type, reference_edge
+
 
 def unit_vectors_have_same_slope(a, b, tol_in_deg):
     min_same_slope_dot = math.cos(math.radians(tol_in_deg))
@@ -295,6 +311,8 @@ def propagate_parameters(polygon_knowledge: PolygonKnowledge,
 
                     # Solve
                     solution = sp.solve(eq, (s, t), dict=True)
+                    if not solution:
+                        continue
 
                     C1_sol = C1.subs(solution[0])
                     C2_sol = C2.subs(solution[0])
@@ -429,6 +447,7 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
                                  find_match_in_individual_parameters: bool = False,
                                  tol: float = 0.01,
                                  uv_tol_in_deg: float = 10.0,
+                                 angle_tol_in_deg: Optional[float] = None,
                                  validate_individual_match_across_fields: bool = False) -> Tuple[bool, Optional[int]]:
     """
     Pattern matching using combinations of features
@@ -438,8 +457,10 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
     :param match_corner_coordinates: Whether to match pattern first on the basis of corners before using rest of the knowledge
     :param find_match_in_individual_parameters: Whether to check if any of the parameters can individually give a unique match 
     rather than checking for uniqueness across all parameters jointly
-    :param tol: Tolerance for numerical comparison
+    :param tol: Tolerance for metric and other scalar comparisons
     :param uv_tol_in_deg: Tolerance for unit vector comparison in degrees
+    :param angle_tol_in_deg: Tolerance for corner and dihedral angles in degrees;
+    defaults to ``tol`` for backward compatibility
     :param validate_individual_match_across_fields: If True, a match found from
     one individual field must also be consistent with all other known fields
     :return: Whether a unique pattern is found and if so, the index of the first edge in current_knowledge
@@ -448,18 +469,20 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
     rck = current_knowledge
     rpk = prior_knowledge
     n_sides = rck.n_sides
+    angle_tol_in_deg = tol if angle_tol_in_deg is None else angle_tol_in_deg
     fields_to_check = ['slopes',  'edge_unit_vectors', 'lengths',
                        'corners', 'corner_angles',     'dihedrals',
                        'is_reflexive_angle']
 
-    def field_values_match(rck_value, rpk_value, compare_unit_vectors=False, compare_boolean=False):
+    def field_values_match(field, rck_value, rpk_value, compare_unit_vectors=False, compare_boolean=False):
         if rck_value is None or rpk_value is None:
             return True
         if compare_unit_vectors:
             return unit_vectors_have_same_slope(rck_value, rpk_value, tol_in_deg=uv_tol_in_deg)
         if compare_boolean:
             return rck_value == rpk_value
-        return is_close(rck_value, rpk_value, tol=tol)
+        value_tol = angle_tol_in_deg if field in {'corner_angles', 'dihedrals'} else tol
+        return is_close(rck_value, rpk_value, tol=value_tol)
 
     def shift_is_consistent_across_fields(shift):
         for field in fields_to_check:
@@ -468,7 +491,8 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
             compare_unit_vectors = field == 'edge_unit_vectors'
             compare_boolean = field == 'is_reflexive_angle'
             for i in range(n_sides):
-                if not field_values_match(rck_field[(i + shift) % n_sides],
+                if not field_values_match(field,
+                                          rck_field[(i + shift) % n_sides],
                                           rpk_field[i],
                                           compare_unit_vectors=compare_unit_vectors,
                                           compare_boolean=compare_boolean):
@@ -481,9 +505,10 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
         # Motivation: for example, if initially it is known that only one edge dihedral angle is unique, then when it is perceived, 
         # it can lead to matching indices without checking for complete uniqueness across all parameters. This also allows to find a unique match with partial knowledge
 
-        def matches(curr_knw_rotated, prior_knw_field, compare_unit_vectors=False, compare_boolean=False):
+        def matches(field, curr_knw_rotated, prior_knw_field, compare_unit_vectors=False, compare_boolean=False):
             for a, b in zip(curr_knw_rotated, prior_knw_field):
-                if not field_values_match(a,
+                if not field_values_match(field,
+                                          a,
                                           b,
                                           compare_unit_vectors=compare_unit_vectors,
                                           compare_boolean=compare_boolean):
@@ -495,7 +520,7 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
             rck_field = getattr(rck, field)
             compare_unit_vectors = field == 'edge_unit_vectors'
             if not is_cyclically_unique(rpk_field,
-                                        tol,
+                                        angle_tol_in_deg if field in {'corner_angles', 'dihedrals'} else tol,
                                         compare_unit_vectors=compare_unit_vectors,
                                         uv_tol_in_deg=uv_tol_in_deg):
                 continue
@@ -505,7 +530,8 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
             compare_boolean = field == 'is_reflexive_angle'
             for shift in range(n_sides):
                 rotated = rck_field[shift:] + rck_field[:shift]
-                if matches(rotated,
+                if matches(field,
+                           rotated,
                            rpk_field,
                            compare_unit_vectors=compare_unit_vectors,
                            compare_boolean=compare_boolean):
@@ -559,7 +585,11 @@ def get_unique_pattern_ref_index(current_knowledge: PolygonKnowledge,
                         if a != b:
                             pattern_found = False
                             break
-                    elif not is_close(a, b, tol=tol):
+                    elif not is_close(
+                        a,
+                        b,
+                        tol=angle_tol_in_deg if field in {'corner_angles', 'dihedrals'} else tol,
+                    ):
                         pattern_found = False
                         break
             # if current k position switch is invalid, break the loop
@@ -593,6 +623,14 @@ def next_action(know: PolygonKnowledge,
     :param gt: Temporary know to fill out dof until constraint propagation symbolically is implemented
     """
 
+    global LAST_ACTION_SELECTION_TRACE
+    LAST_ACTION_SELECTION_TRACE = {
+        "policy": "legacy-next-action",
+        "rationale": "Selected from current knowledge, previous action, and re-index state.",
+        "candidate_edges": [],
+        "candidate_scores": [],
+        "tie_break": "first candidate with strictly smaller residual DoF",
+    }
     num_sides = know.n_sides
     edges_available_to_explore = []
     pose_anchor_candidates = set()
@@ -618,7 +656,7 @@ def next_action(know: PolygonKnowledge,
         for i in range(num_sides):
             if know.dihedrals[i] is None:
                 print("All edges are known, sliding to know dihedral angle")
-                return (ActionType.SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT, i)
+                return _return_selected_action(ActionType.SLIDE_OVER_SURFACE_PERPENDICULAR_TO_EDGE_GIVEN_ONE_POINT, i)
 
     if prev_action_instance.action_type:
         prev_action_spec = action_spec_from_action(prev_action_instance.action_type)
@@ -636,7 +674,7 @@ def next_action(know: PolygonKnowledge,
         else:
             print("Performing default action to explore first edge since no edge unit vector is known. ")
             print("prev_action_ref_edge_idx: ", prev_action_ref_edge_idx, "prev_action_spec: ", prev_action_spec)
-            return (ActionType.SLIDE_OVER_SURFACE_UNTIL_EDGE, 0)
+            return _return_selected_action(ActionType.SLIDE_OVER_SURFACE_UNTIL_EDGE, 0)
 
     # get best edge index to explore
     for i in range(num_sides):
@@ -743,12 +781,18 @@ def next_action(know: PolygonKnowledge,
             propagate_symbolic(symbolic_knowledge)
             best_dof = symbolic_dof(symbolic_knowledge)
 
+            LAST_ACTION_SELECTION_TRACE["candidate_edges"] = [int(edge) for edge in edges_available_to_explore]
+            candidate_scores = []
             for edge_idx in edges_available_to_explore:
                 predicted_knowledge = predict_edge_exploration(
                     symbolic_knowledge,
                     edge_idx,
                 )
                 dof_after_measurement = symbolic_dof(predicted_knowledge)
+                candidate_scores.append({
+                    "edge": int(edge_idx),
+                    "residual_dof": int(dof_after_measurement),
+                })
                 logger.info(
                     "Symbolic edge-exploration score for edge %s: DOF %s -> %s",
                     edge_idx,
@@ -758,6 +802,8 @@ def next_action(know: PolygonKnowledge,
                 if dof_after_measurement < best_dof:
                     best_dof = dof_after_measurement
                     best_edge_idx = edge_idx
+            LAST_ACTION_SELECTION_TRACE["candidate_scores"] = candidate_scores
+            LAST_ACTION_SELECTION_TRACE["selected_edge"] = int(best_edge_idx)
 
     # find best action spec and the reference edge
     prev_edge_idx_of_best_edge_idx = (best_edge_idx - 1) % num_sides
@@ -820,7 +866,7 @@ def next_action(know: PolygonKnowledge,
                             stop = Stop.UNTIL_EDGE_CONTACT
                             best_action_spec = ActionSpec(direction, mode, stop)
                             best_action_type = SPEC_TO_ACTION[best_action_spec]
-                            return (best_action_type, ref_edge) 
+                            return _return_selected_action(best_action_type, ref_edge)
                         
                         elif reflexivity_of_next_edge_idx_of_best_edge_idx is None:
                             direction = Direction.CCK
@@ -860,7 +906,7 @@ def next_action(know: PolygonKnowledge,
 
                         best_action_spec = ActionSpec(direction, mode, stop)
                         best_action_type = SPEC_TO_ACTION[best_action_spec]
-                        return (best_action_type, best_edge_idx)
+                        return _return_selected_action(best_action_type, best_edge_idx)
 
                     # Case 2: did not find the target edge. The tested corner should now be reflexive, so approach from outside.
                     elif reflexivity_of_interest is True:
@@ -878,7 +924,7 @@ def next_action(know: PolygonKnowledge,
                         stop = Stop.UNTIL_EDGE_CONTACT
                         best_action_spec = ActionSpec(direction, mode, stop)
                         best_action_type = SPEC_TO_ACTION[best_action_spec]
-                        return (best_action_type, ref_edge)
+                        return _return_selected_action(best_action_type, ref_edge)
 
                     else:
                         raise ValueError("Unexpected negative count of internal points on best edge.")
@@ -901,7 +947,7 @@ def next_action(know: PolygonKnowledge,
                     stop = Stop.UNTIL_EDGE_CONTACT
                     best_action_spec = ActionSpec(direction, mode, stop)
                     best_action_type = SPEC_TO_ACTION[best_action_spec]
-                    return (best_action_type, ref_edge) # since the reference edge is the adjacent edge
+                    return _return_selected_action(best_action_type, ref_edge) # since the reference edge is the adjacent edge
                 # decide direction of traversal. 
                 # First based on reflexivity of adjacent edges, then based on default direction of traversal
                 elif reflexivity_of_next_edge_idx_of_best_edge_idx is None:
@@ -952,7 +998,7 @@ def next_action(know: PolygonKnowledge,
 
                 best_action_spec = ActionSpec(direction, mode, stop)
                 best_action_type = SPEC_TO_ACTION[best_action_spec]
-                return (best_action_type, best_edge_idx)
+                return _return_selected_action(best_action_type, best_edge_idx)
 
             # when already at the corner of a best edge
             # Note: fact that if sliding over an edge has occured  until its corner then it has ref points which
@@ -1054,7 +1100,7 @@ def next_action(know: PolygonKnowledge,
 
                 best_action_spec = ActionSpec(direction, mode, stop)
                 best_action_type = SPEC_TO_ACTION[best_action_spec]
-                return (best_action_type, ref_edge)
+                return _return_selected_action(best_action_type, ref_edge)
             
             else:
                 print("Previous action was to just get edge-vector and it is not ending at a corner or an edge. Selecting action independent of robot end-effector location")
@@ -1148,7 +1194,7 @@ def next_action(know: PolygonKnowledge,
 
         best_action_spec = ActionSpec(direction, mode, stop)
         best_action_type = SPEC_TO_ACTION[best_action_spec]
-        return (best_action_type, ref_edge)
+        return _return_selected_action(best_action_type, ref_edge)
     return None, None
 
 

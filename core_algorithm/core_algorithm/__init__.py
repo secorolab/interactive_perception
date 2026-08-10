@@ -28,6 +28,7 @@ from .data_structures import (
 from .helper import find_dof, is_close, point_in_list, are_list_elements_uniform, get_random_points_on_line, get_unit_vector, generate_internal_angles
 from .algorithm import (
     next_action,
+    get_last_action_selection_trace,
     propagate_parameters,
     feasible_bounded_lengths,
     find_unique_pattern,
@@ -51,6 +52,7 @@ __all__ = [
     "is_close",
     "point_in_list",
     "next_action",
+    "get_last_action_selection_trace",
     "propagate_parameters",
     "feasible_bounded_lengths",
     "find_unique_pattern",

@@ -707,7 +707,7 @@ def make_action_goal_slide(position=[None, None, None],
                            velocity=[None, None, None],
                            force=[None, None, None],
                            orientation=None,
-                           max_distance=0.15, # in meters
+                           max_distance=0.20, # in meters
                            action_name="slide_to_explore_plane",
                            frame_name="eddie_base_link", 
                            time=1.5
@@ -734,7 +734,7 @@ def make_action_goal_slide(position=[None, None, None],
     velocity_spike_threshold = 0.045
     # frame associatred with this edge will be approx at 7.5 cm from the e-eff center
     # while sliding, e-eff center will be effectively at ~-3cm from the edge
-    y_ax_off_sliding_against_vertical_surface = 0.06
+    y_ax_off_sliding_against_vertical_surface = 0.05
     velocity_spike_threshold_vector = [float(velocity_spike_threshold * uv) if uv is not None else None for uv in unit_vector_of_force]
     velocity_spike_opr_list = [
         gt if uv is not None and uv > 0
@@ -963,7 +963,7 @@ def make_action_goal_slide(position=[None, None, None],
         disjunction 3 (against vertical surface)  : slide until edge where reflexive corner;
         """
         
-        zero_vel_threshold = 0.01
+        zero_vel_threshold = 0.001
         zero_vel_ul = zero_vel_threshold
         zero_vel_ll = -zero_vel_threshold
         
@@ -999,7 +999,7 @@ def make_action_goal_slide(position=[None, None, None],
                 "disjunction_id": 1,
                 "position": 4,
                 "type": "TIME_LIMIT",
-                "value": 5.0,
+                "value": 3.0,
                 "operator": gt
             })
 
@@ -1017,7 +1017,7 @@ def make_action_goal_slide(position=[None, None, None],
                 "disjunction_id": 2,
                 "position": 5,
                 "type": "POSITION_XYZ",
-                "value": [None, None, -0.005],
+                "value": [None, None, -0.01],
                 "operator": [None, None, lt]
             })
         
@@ -1035,7 +1035,7 @@ def make_action_goal_slide(position=[None, None, None],
                 "disjunction_id": 3,
                 "position": 6,
                 "type": "POSITION_XYZ",
-                "value": [None, -y_ax_off_sliding_against_vertical_surface, 0.0],
+                "value": [None, -y_ax_off_sliding_against_vertical_surface, -0.01],
                 "operator": [None, lt, gt]
             })
         current_template = edit_condition(current_template, {

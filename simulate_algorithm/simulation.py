@@ -146,7 +146,7 @@ def generate_prior_knowledge_from_gt(gt: PolygonKnowledge,
             rpk.dihedrals[1] = gt.dihedrals[1]
             rpk.dihedrals[5] = gt.dihedrals[5]
             rpk.lengths[0] = gt.lengths[0]
-            rpk.corners[0] = gt.corners[0]
+            rpk.corners[0] = gt.corners[0] # check if required
         
         # scenario2: action selection
         if scenario_id == 2:
@@ -155,7 +155,7 @@ def generate_prior_knowledge_from_gt(gt: PolygonKnowledge,
                 rpk.corner_angles[i] = gt.corner_angles[i]
             for i in (1, 3, 4, 5, 6, 7):
                 rpk.dihedrals[i] = gt.dihedrals[i]
-            rpk.corners[6] = gt.corners[6]
+            rpk.corners[6] = gt.corners[6] # check if required
     else:
         raise ValueError("degree_of_prior_knowledge must be 0, 1, 2, 3, 4, or 5")
     return rpk

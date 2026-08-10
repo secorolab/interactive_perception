@@ -473,8 +473,12 @@ def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
     know = polygon_knowledge
     num_sides = know.n_sides
     changed = True
+    iterations = 0
     
     while changed:
+        iterations += 1
+        if iterations > 100:
+            raise RuntimeError("Polygon-knowledge preprocessing did not converge")
         changed = False
 
         # If corner coordinates are in internal_points_on_edge, remove them
@@ -506,37 +510,68 @@ def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
                             # is_close might fail if point format is unexpected, skip
                             pass
 
-        # If internal points on an edge are not ordered in counterclockwise direction, rearrange them
-        # This is currently on the basis of knowledge of a corner. When accumulating the points by sliding, 
-        # it is assumed to be ordered in CCW by default
+        # Remove samples beyond known endpoints before applying endpoint-based ordering.
+        # Otherwise, distances to both endpoints can increase in the same direction and
+        # make the two ordering checks reverse the samples indefinitely.
         if not changed:
             for i in range(num_sides):
-                prev_idx = (i - 1) % num_sides
-                current_corner = know.corners[i]
-                if current_corner:
-                    current_corner_arr = np.asarray(current_corner)
-                    pts_on_curr_edge = know.internal_points_on_edge[i]
+                corner_start = know.corners[i]
+                corner_end = know.corners[(i+1)%num_sides]
+                if corner_start is None or corner_end is None:
+                    continue
 
-                    # Edge i: ascending order
-                    if len(pts_on_curr_edge) > 1:
-                        key_fn = lambda p: np.linalg.norm(np.asarray(p) - current_corner_arr)
-                        if not is_sorted_by_key(pts_on_curr_edge, key_fn):
-                            print(f" => The distances of points on edge {i} to corner {i} are not in ascending order: {[key_fn(p) for p in pts_on_curr_edge]}")
-                            pts_on_curr_edge.sort(key=key_fn)
-                            know.internal_points_on_edge[i] = pts_on_curr_edge
-                            changed = True
-                            print(f" => Rearranged points on edge {i} in ascending order to {pts_on_curr_edge}")
+                corner_start_arr = np.asarray(corner_start)
+                corner_end_arr = np.asarray(corner_end)
+                edge_vector = corner_end_arr - corner_start_arr
+                edge_length = np.linalg.norm(edge_vector)
+                if edge_length == 0:
+                    continue
+                edge_unit_vector = edge_vector / edge_length
 
-                    # Edge i-1: descending order
-                    pts_on_prev_edge = know.internal_points_on_edge[prev_idx]
-                    if len(pts_on_prev_edge) > 1:
-                        key_fn = lambda p: np.linalg.norm(np.asarray(p) - current_corner_arr)
-                        if not is_sorted_by_key(pts_on_prev_edge, key_fn, reverse=True):
-                            print(f" => The distances of points on edge {prev_idx} to corner {i} are not in descending order: {[key_fn(p) for p in pts_on_prev_edge]}")
-                            pts_on_prev_edge.sort(key=key_fn, reverse=True)
-                            know.internal_points_on_edge[prev_idx] = pts_on_prev_edge
-                            changed = True
-                            print(f" => Rearranged points on edge {prev_idx} in descending order to  {pts_on_prev_edge}")
+                to_remove = []
+                for point in know.internal_points_on_edge[i]:
+                    projection_length = np.dot(np.asarray(point) - corner_start_arr, edge_unit_vector)
+                    if projection_length < 0 or projection_length > edge_length:
+                        to_remove.append(point)
+
+                for point in to_remove:
+                    for j, candidate in enumerate(know.internal_points_on_edge[i]):
+                        try:
+                            if is_close(point, candidate):
+                                know.internal_points_on_edge[i].pop(j)
+                                changed = True
+                                print(f" => Removed point {point} from edge {i} as it lies outside the edge bounds")
+                                break
+                        except (ValueError, TypeError):
+                            pass
+
+        # Order every edge once in the canonical corner-i to corner-(i+1)
+        # direction. If only the head is known, descending distance from it is
+        # the equivalent ordering.
+        if not changed:
+            for i in range(num_sides):
+                points = know.internal_points_on_edge[i]
+                if len(points) < 2:
+                    continue
+
+                tail_corner = know.corners[i]
+                head_corner = know.corners[(i + 1) % num_sides]
+                if tail_corner is not None:
+                    corner = np.asarray(tail_corner)
+                    reverse = False
+                elif head_corner is not None:
+                    corner = np.asarray(head_corner)
+                    reverse = True
+                else:
+                    continue
+
+                key_fn = lambda p, corner=corner: np.linalg.norm(np.asarray(p) - corner)
+                if not is_sorted_by_key(points, key_fn, reverse=reverse):
+                    order = "descending" if reverse else "ascending"
+                    print(f" => The distances of points on edge {i} are not in {order} order: {[key_fn(p) for p in points]}")
+                    points.sort(key=key_fn, reverse=reverse)
+                    changed = True
+                    print(f" => Rearranged points on edge {i} in {order} order to {points}")
                             
         # If atleast 'min_points_to_remove_outliers' number of internal points exist, then remove outliers 
         # outside a threshold 'inlier_distance_threshold'
@@ -568,43 +603,6 @@ def pre_process_polygon_knowledge(polygon_knowledge: PolygonKnowledge,
                                 except (ValueError, TypeError):
                                     pass
 
-        # If any points on edge is outside the edge bounded by corners, remove them. This could happen when slide until corner overshoots the corner in edge case
-        if not changed:
-            for i in range(num_sides):
-                corner_start = know.corners[i]
-                corner_end = know.corners[(i+1)%num_sides]
-                if corner_start is None or corner_end is None:
-                    continue
-                
-                corner_start_arr = np.asarray(corner_start)
-                corner_end_arr = np.asarray(corner_end)
-                edge_vector = corner_end_arr - corner_start_arr
-                edge_length = np.linalg.norm(edge_vector)
-                if edge_length == 0:
-                    continue
-                edge_unit_vector = edge_vector / edge_length
-
-                to_remove = []
-                for point in know.internal_points_on_edge[i]:
-                    point_arr = np.asarray(point)
-                    vec_from_start = point_arr - corner_start_arr
-                    projection_length = np.dot(vec_from_start, edge_unit_vector)
-
-                    if projection_length < 0 or projection_length > edge_length:
-                        to_remove.append(point)
-
-                for point in to_remove:
-                    # Use index-based removal to avoid numpy array issues
-                    for j, p in enumerate(know.internal_points_on_edge[i]):
-                        try:
-                            if is_close(point, p):
-                                know.internal_points_on_edge[i].pop(j)
-                                changed = True
-                                print(f" => Removed point {point} from edge {i} as it lies outside the edge bounds")
-                                break
-                        except (ValueError, TypeError):
-                            pass
-        
         # Rule: if any of internal points is at a distance less than a threshold from other points, 
         # then replace them with their average, such that number of points doesn't go below 2
         if not changed:

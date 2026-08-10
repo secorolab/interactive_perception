@@ -4,6 +4,15 @@
 experiment:
   id: 4
   n_sides: 8
+  # Optional seed recorded in reproducibility metadata when simulation or
+  # randomized fitting is used.
+  random_seed: null
+
+# Optional hardware/calibration identifiers recorded with each run.
+hardware:
+  robot_id: null
+  controller_firmware: null
+  calibration_id: null
 
 # Knowledge propagation parameters
 knowledge_propagation:
@@ -23,7 +32,8 @@ motion:
   offset_from_edge_while_moving_from_outside_to_edge: 0.04
   force_against_surface: 30.0
   force_along_edge_to_find_slope: 15.0
-  diameter_of_end_effector: 0.0754
+  diameter_of_end_effector: 0.076
+  offset_due_to_camera: 0.037
   offset_from_edge_while_sliding_against_vertical_surface: 0.019
   distance_threshold_for_motion_detection: 0.015
   angle_increment_radians: 0.174533  # 10 degrees in radians
@@ -84,4 +94,6 @@ visualization:
 logging:
   # final_only: write one RCK JSON snapshot when exploration completes
   # on_update: also write timestamped RCK snapshots after RCK update/sync points
+  # Each snapshot includes reproducibility metadata and a compact per-action
+  # and per-primitive trace with knowledge deltas; no bag files are written.
   rck_save_mode: final_only
