@@ -543,7 +543,12 @@ def _prune_unused_constraints(template, condition_type):
 
 ## functions to create motion specifications for different action types
 
-def make_action_goal_move(position, orientation, frame_name="marker_frame_0"):
+def make_action_goal_move(
+    position,
+    orientation,
+    frame_name="marker_frame_0",
+    orientation_tolerance_deg=None,
+):
     current_template = copy.deepcopy(Templates.move)
     tolerance = 0.01
 
@@ -599,6 +604,23 @@ def make_action_goal_move(position, orientation, frame_name="marker_frame_0"):
                                 "value": [xh, yh, zh],
                                 "operator": [lt, lt, lt]
                               })
+
+    if orientation_tolerance_deg is not None:
+        orientation_tolerance_deg = float(orientation_tolerance_deg)
+        if not math.isfinite(orientation_tolerance_deg) or orientation_tolerance_deg <= 0.0:
+            raise ValueError("orientation_tolerance_deg must be finite and positive")
+        current_template = edit_condition(current_template, {
+            "condition_type": "POST_CONDITION",
+            "constraint_count": 3,
+        })
+        current_template = edit_condition(current_template, {
+            "condition_type": "POST_CONDITION",
+            "disjunction_id": 1,
+            "position": 3,
+            "type": "ORIENTATION_ERROR",
+            "value": orientation_tolerance_deg,
+            "operator": lt,
+        })
 
     return str(current_template)
 

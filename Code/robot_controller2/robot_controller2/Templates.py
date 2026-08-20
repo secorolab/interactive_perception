@@ -8,6 +8,7 @@ ORIENTATION_QUATERNION = 4,
 ORIENTATION_ROLL = 1,
 ORIENTATION_PITCH = 1,
 ORIENTATION_YAW = 1
+ORIENTATION_ERROR = 1
 
 
 reset = {
@@ -145,6 +146,12 @@ move = {
                     'type': 'POSITION_XYZ',
                     'value': [None, None, None],
                     'operator': [None, None, None]
+                },
+                3: {
+                    "disjunction_id": 1,
+                    'type': 'ORIENTATION_ERROR',
+                    'value': None,
+                    'operator': None
                 },
             }
         }
@@ -396,7 +403,6 @@ yaw = {
         }
     }
 }
-
 
 
 
