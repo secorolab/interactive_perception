@@ -629,7 +629,7 @@ def next_action(know: PolygonKnowledge,
         "rationale": "Selected from current knowledge, previous action, and re-index state.",
         "candidate_edges": [],
         "candidate_scores": [],
-        "tie_break": "first candidate with strictly smaller residual DoF",
+        "tie_break": "first candidate with strictly smaller residual score",
     }
     num_sides = know.n_sides
     edges_available_to_explore = []
@@ -794,7 +794,7 @@ def next_action(know: PolygonKnowledge,
                     "residual_dof": int(dof_after_measurement),
                 })
                 logger.info(
-                    "Symbolic edge-exploration score for edge %s: DOF %s -> %s",
+                    "Symbolic edge-exploration score for edge %s: %s -> %s",
                     edge_idx,
                     best_dof,
                     dof_after_measurement,

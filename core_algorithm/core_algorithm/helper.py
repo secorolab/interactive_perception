@@ -87,32 +87,49 @@ def line_intersection(p1: Tuple[float, float],
     return (xi, yi) if np.isfinite(xi) and np.isfinite(yi) else None
 
 
-def find_dof(know: PolygonKnowledge) -> int:
-    """
-    DOF estimate
+def geometric_attribute_score(know: PolygonKnowledge) -> int:
+    """Return the task-specific residual geometric-attribute score.
 
-    :param know: Knowledge of the polygon
-    :return: Estimated degrees of freedom remaining
+    Counts are taken from unique currently resolved indexed attributes.  This
+    heuristic is used for query ranking; it is not a formal geometric nullity.
     """
-    # Assumption: the surface slope is already known, and it is considered as 2D
 
     num_sides = know.n_sides
-    dof = (2*(num_sides-1)-1) + 3 + num_sides # total params: (2*(n-1) -1) intrinsic dof + 3 rigid body dof + num_sides of dihedral angles = absolute dof
-    # Note: intrinsic is reduced by one as the edge_unit_vector information counted for rigid body also accounts for one corner angle
-    # subtract 1 rigid-body dof (extrinsic) if atleast one edge_unit_vector is known
-    if any(u is not None for u in know.edge_unit_vectors):
-        dof -= 1
-    # subtract 2 rigid-body dof (extrinsic) if atleast one corner is known
-    if any(c is not None for c in know.corners):
-        dof -= 2
+    edge_anchor = int(any(value is not None for value in know.edge_unit_vectors))
+    vertex_anchor = int(any(value is not None for value in know.corners))
+    num_angles = sum(value is not None for value in know.corner_angles)
+    num_lengths = sum(value is not None for value in know.lengths)
+    num_dihedrals = sum(value is not None for value in know.dihedrals)
+    return (
+        3 * num_sides
+        - edge_anchor
+        - 2 * vertex_anchor
+        - min(num_sides - 2, num_angles)
+        - min(num_sides - 1, num_lengths)
+        - num_dihedrals
+    )
 
-    # subtract one intrinsic dof for each known corner angle and length
-    # -1 for last edge, and additional -1 for known edge_unit_vector (as it constrains one corner angle)
-    dof -= min(num_sides-2, sum(1 for a in know.corner_angles if a is not None))
-    dof -= min(num_sides-1, sum(1 for l in know.lengths if l is not None))
-    dof -= sum(1 for d in know.dihedrals if d is not None)
 
-    return dof
+def find_dof(know: PolygonKnowledge) -> int:
+    """Compatibility alias for :func:`geometric_attribute_score`."""
+
+    return geometric_attribute_score(know)
+
+
+def is_geometric_task_complete(know: PolygonKnowledge) -> bool:
+    """Return whether every attributed-boundary output is resolved."""
+
+    return all(
+        all(value is not None for value in getattr(know, field))
+        for field in (
+            "edge_unit_vectors",
+            "lengths",
+            "corners",
+            "corner_angles",
+            "is_reflexive_angle",
+            "dihedrals",
+        )
+    )
 
 
 T = TypeVar("T")

@@ -358,7 +358,7 @@ def propagate_symbolic(knowledge: SymbolicKnowledge) -> bool:
 
 
 def symbolic_dof(knowledge: SymbolicKnowledge) -> int:
-    """Return the current DOF estimate using the numerical model's convention."""
+    """Return the task-specific score using the numerical model's convention."""
     n_sides = knowledge.n_sides
     dof = 3 * n_sides
     if any(knowledge.edge_vector_known):

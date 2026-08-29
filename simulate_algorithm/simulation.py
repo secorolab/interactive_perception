@@ -32,6 +32,7 @@ from core_algorithm import (
     find_unique_pattern,
     get_unique_pattern_ref_index,
     find_dof,
+    is_geometric_task_complete,
     rearrange_rck_using_prior_knowledge,
     fill_missing_parameters,
     get_random_points_on_line,
@@ -302,10 +303,10 @@ def simulate_robot(to_plot: bool = False,
     propagate_parameters(rck)
     rck.print_knowledge("Robot Current Knowledge (rck)")
     dof = find_dof(rck)
-    print(f"Initial DOF = {dof}")
+    print(f"Initial residual score = {dof}")
 
     # Main simulation loop
-    while find_dof(rck) > 0 and steps < step_limit:
+    while not is_geometric_task_complete(rck) and steps < step_limit:
         print("\n ***************  Step number: ", steps, "  ***************")
         act, edge_idx = next_action(rck, prev_action_instance, rck_rearranged, in_simulation=True, gt=gt)
         if act: print("Action to perform: ", act.name, " reference edge: ", edge_idx)
@@ -523,7 +524,7 @@ def simulate_robot(to_plot: bool = False,
         
         rck.print_knowledge("Robot Current Knowledge (rck)")
         dof = find_dof(rck)
-        print(f"DOF = {dof}")
+        print(f"Residual score = {dof}")
         if to_plot:
             rck.plot_polygon("Reconstructed Polygon")
         steps += 1
