@@ -25,7 +25,8 @@ from .data_structures import (
     SPEC_TO_ACTION,
     ACTION_TO_SPEC
 )
-from .helper import geometric_attribute_score, find_dof, is_geometric_task_complete, is_close, point_in_list, are_list_elements_uniform, get_random_points_on_line, get_unit_vector, generate_internal_angles
+from .geometric_rank import geometric_constraint_rank, generic_geometric_constraint_rank
+from .helper import compute_residual_score_old, geometric_attribute_score, find_dof, is_geometric_task_complete, is_close, point_in_list, are_list_elements_uniform, get_random_points_on_line, get_unit_vector, generate_internal_angles
 from .algorithm import (
     next_action,
     get_last_action_selection_trace,
@@ -49,7 +50,10 @@ __all__ = [
     "SPEC_TO_ACTION",
     "ACTION_TO_SPEC",
     "find_dof",
+    "compute_residual_score_old",
     "geometric_attribute_score",
+    "geometric_constraint_rank",
+    "generic_geometric_constraint_rank",
     "is_geometric_task_complete",
     "is_close",
     "point_in_list",

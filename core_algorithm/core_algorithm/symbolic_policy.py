@@ -17,6 +17,7 @@ from typing import Iterable, Optional, Sequence
 import sympy as sp
 
 from .data_structures import ACTION_TO_SPEC, ActionInstance, ActionType, Direction, Stop
+from .geometric_rank import generic_geometric_constraint_rank
 from .helper import action_spec_from_action, find_dof
 from .polygon_knowledge import PolygonKnowledge
 
@@ -357,8 +358,9 @@ def propagate_symbolic(knowledge: SymbolicKnowledge) -> bool:
     return changed_any
 
 
-def symbolic_dof(knowledge: SymbolicKnowledge) -> int:
-    """Return the task-specific score using the numerical model's convention."""
+def symbolic_residual_score_old(knowledge: SymbolicKnowledge) -> int:
+    """Return the former capped symbolic score for diagnostics only."""
+
     n_sides = knowledge.n_sides
     dof = 3 * n_sides
     if any(knowledge.edge_vector_known):
@@ -371,6 +373,21 @@ def symbolic_dof(knowledge: SymbolicKnowledge) -> int:
         len(domain) == 1 for domain in knowledge.dihedral_domains
     )
     return dof
+
+
+def symbolic_dof(knowledge: SymbolicKnowledge) -> int:
+    """Return the deterministic generic-rank score for a symbolic state."""
+
+    n_sides = knowledge.n_sides
+    edge_anchor = int(any(knowledge.edge_vector_known))
+    vertex_anchor = int(any(knowledge.corner_known))
+    rank = generic_geometric_constraint_rank(
+        n_sides,
+        knowledge.length_known,
+        knowledge.corner_angle_known,
+    )
+    num_dihedrals = sum(len(domain) == 1 for domain in knowledge.dihedral_domains)
+    return 3 * n_sides - edge_anchor - 2 * vertex_anchor - rank - num_dihedrals
 
 
 @dataclass(frozen=True)

@@ -5,6 +5,7 @@ import math
 from typing import Union, Tuple, Optional, List, Callable, TypeVar, Sequence, Dict
 from .polygon_knowledge import PolygonKnowledge
 from .data_structures import *
+from .geometric_rank import geometric_constraint_rank
 
 def is_close(p1: Union[float, Tuple[float, float]], 
              p2: Union[float, Tuple[float, float]], 
@@ -87,12 +88,8 @@ def line_intersection(p1: Tuple[float, float],
     return (xi, yi) if np.isfinite(xi) and np.isfinite(yi) else None
 
 
-def geometric_attribute_score(know: PolygonKnowledge) -> int:
-    """Return the task-specific residual geometric-attribute score.
-
-    Counts are taken from unique currently resolved indexed attributes.  This
-    heuristic is used for query ranking; it is not a formal geometric nullity.
-    """
+def compute_residual_score_old(know: PolygonKnowledge) -> int:
+    """Return the former capped score for diagnostics only."""
 
     num_sides = know.n_sides
     edge_anchor = int(any(value is not None for value in know.edge_unit_vectors))
@@ -106,6 +103,30 @@ def geometric_attribute_score(know: PolygonKnowledge) -> int:
         - 2 * vertex_anchor
         - min(num_sides - 2, num_angles)
         - min(num_sides - 1, num_lengths)
+        - num_dihedrals
+    )
+
+
+def geometric_attribute_score(know: PolygonKnowledge) -> int:
+    """Return the rank-based residual geometric-attribute score."""
+
+    num_sides = know.n_sides
+    edge_anchor = int(any(
+        value is not None
+        and np.all(np.isfinite(value))
+        and np.linalg.norm(value) > 1e-10
+        for value in know.edge_unit_vectors
+    ))
+    vertex_anchor = int(any(
+        value is not None and np.all(np.isfinite(value))
+        for value in know.corners
+    ))
+    num_dihedrals = sum(value is not None for value in know.dihedrals)
+    return (
+        3 * num_sides
+        - edge_anchor
+        - 2 * vertex_anchor
+        - geometric_constraint_rank(know)
         - num_dihedrals
     )
 
