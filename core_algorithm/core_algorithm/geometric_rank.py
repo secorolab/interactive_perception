@@ -45,7 +45,6 @@ def _constraint_jacobian(
     points: np.ndarray,
     length_known: Sequence[bool],
     angle_known: Sequence[bool],
-    angle_values_deg: Sequence[float | None] | None,
 ) -> np.ndarray:
     """Build length and signed-angle Jacobian rows at one configuration."""
 
@@ -69,15 +68,7 @@ def _constraint_jacobian(
         next_index = (index + 1) % n_sides
         incoming = points[index] - points[previous_index]
         outgoing = points[next_index] - points[index]
-        if angle_values_deg is None:
-            turn = _turn_angle(points, index)
-        else:
-            alpha = float(angle_values_deg[index])
-            if not math.isfinite(alpha) or not 0.0 < alpha < 360.0:
-                raise ValueError(f"corner angle {index} must lie in (0, 360) degrees")
-            if math.isclose(alpha, 180.0, abs_tol=1e-9):
-                raise ValueError(f"corner angle {index} is degenerate at 180 degrees")
-            turn = math.pi - math.radians(alpha)
+        turn = _turn_angle(points, index)
 
         cosine = math.cos(turn)
         sine = math.sin(turn)
@@ -113,8 +104,6 @@ def generic_geometric_constraint_rank(
     length_known: Sequence[bool],
     angle_known: Sequence[bool],
     *,
-    angle_values_deg: Sequence[float | None] | None = None,
-    candidate_points: Sequence[np.ndarray] = (),
     relative_tolerance: float = DEFAULT_RANK_TOLERANCE,
 ) -> int:
     """Estimate generic joint rank from fixed nondegenerate configurations.
@@ -129,24 +118,19 @@ def generic_geometric_constraint_rank(
         raise ValueError("a polygon requires at least three sides")
     if len(length_known) != n_sides or len(angle_known) != n_sides:
         raise ValueError("constraint masks must contain one entry per edge/vertex")
-    if angle_values_deg is not None and len(angle_values_deg) != n_sides:
-        raise ValueError("angle values must contain one entry per vertex")
     if not 0.0 < relative_tolerance < 1.0:
         raise ValueError("relative rank tolerance must lie in (0, 1)")
 
-    configurations = [np.asarray(points, dtype=float) for points in candidate_points]
-    configurations.extend(_generic_polygon(n_sides, seed) for seed in _GENERIC_SEEDS)
     ranks = (
         _relative_rank(
             _constraint_jacobian(
-                points.reshape(n_sides, 2),
+                _generic_polygon(n_sides, seed),
                 length_known,
                 angle_known,
-                angle_values_deg,
             ),
             relative_tolerance,
         )
-        for points in configurations
+        for seed in _GENERIC_SEEDS
     )
     return min(2 * n_sides - 3, max(ranks, default=0))
 
@@ -171,13 +155,9 @@ def geometric_constraint_rank(
             raise ValueError(f"corner angle {index} must lie in (0, 360) degrees")
         if math.isclose(angle, 180.0, abs_tol=1e-9):
             raise ValueError(f"corner angle {index} is degenerate at 180 degrees")
-    candidate_points = ()
-    if all(point is not None for point in knowledge.corners):
-        candidate_points = (np.asarray(knowledge.corners, dtype=float),)
     return generic_geometric_constraint_rank(
         knowledge.n_sides,
         length_known,
         angle_known,
-        candidate_points=candidate_points,
         relative_tolerance=relative_tolerance,
     )
