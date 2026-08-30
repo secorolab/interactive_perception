@@ -12,6 +12,7 @@ from .polygon_knowledge import PolygonKnowledge
 from .helper import *
 from .data_structures import *
 from .symbolic_policy import (
+    action_target_edge,
     predict_edge_exploration,
     propagate_symbolic,
     symbolic_dof,
@@ -629,7 +630,7 @@ def next_action(know: PolygonKnowledge,
         "rationale": "Selected from current knowledge, previous action, and re-index state.",
         "candidate_edges": [],
         "candidate_scores": [],
-        "tie_break": "first candidate with strictly smaller residual score",
+        "tie_break": "continuation edge, then candidate order, after residual score",
     }
     num_sides = know.n_sides
     edges_available_to_explore = []
@@ -780,6 +781,17 @@ def next_action(know: PolygonKnowledge,
             symbolic_knowledge = symbolic_from_polygon_knowledge(know)
             propagate_symbolic(symbolic_knowledge)
             best_dof = symbolic_dof(symbolic_knowledge)
+            continuation_edge = (
+                action_target_edge(
+                    prev_action_instance.action_type,
+                    prev_action_instance.edge_index,
+                    num_sides,
+                )
+                if prev_action_instance.action_type is not None
+                and prev_action_instance.edge_index is not None
+                else None
+            )
+            best_key = (best_dof, best_edge_idx != continuation_edge)
 
             LAST_ACTION_SELECTION_TRACE["candidate_edges"] = [int(edge) for edge in edges_available_to_explore]
             candidate_scores = []
@@ -799,7 +811,12 @@ def next_action(know: PolygonKnowledge,
                     best_dof,
                     dof_after_measurement,
                 )
-                if dof_after_measurement < best_dof:
+                candidate_key = (
+                    dof_after_measurement,
+                    edge_idx != continuation_edge,
+                )
+                if candidate_key < best_key:
+                    best_key = candidate_key
                     best_dof = dof_after_measurement
                     best_edge_idx = edge_idx
             LAST_ACTION_SELECTION_TRACE["candidate_scores"] = candidate_scores

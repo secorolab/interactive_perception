@@ -5,7 +5,7 @@ import math
 from typing import Union, Tuple, Optional, List, Callable, TypeVar, Sequence, Dict
 from .polygon_knowledge import PolygonKnowledge
 from .data_structures import *
-from .geometric_rank import geometric_constraint_rank
+from .geometric_rank import geometric_joint_constraint_rank
 
 def is_close(p1: Union[float, Tuple[float, float]], 
              p2: Union[float, Tuple[float, float]], 
@@ -108,27 +108,11 @@ def compute_residual_score_old(know: PolygonKnowledge) -> int:
 
 
 def geometric_attribute_score(know: PolygonKnowledge) -> int:
-    """Return the rank-based residual geometric-attribute score."""
+    """Return the joint-rank residual geometric-attribute score."""
 
     num_sides = know.n_sides
-    edge_anchor = int(any(
-        value is not None
-        and np.all(np.isfinite(value))
-        and np.linalg.norm(value) > 1e-10
-        for value in know.edge_unit_vectors
-    ))
-    vertex_anchor = int(any(
-        value is not None and np.all(np.isfinite(value))
-        for value in know.corners
-    ))
     num_dihedrals = sum(value is not None for value in know.dihedrals)
-    return (
-        3 * num_sides
-        - edge_anchor
-        - 2 * vertex_anchor
-        - geometric_constraint_rank(know)
-        - num_dihedrals
-    )
+    return 3 * num_sides - geometric_joint_constraint_rank(know) - num_dihedrals
 
 
 def find_dof(know: PolygonKnowledge) -> int:

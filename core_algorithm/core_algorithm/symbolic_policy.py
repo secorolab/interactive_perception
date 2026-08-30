@@ -17,7 +17,7 @@ from typing import Iterable, Optional, Sequence
 import sympy as sp
 
 from .data_structures import ACTION_TO_SPEC, ActionInstance, ActionType, Direction, Stop
-from .geometric_rank import generic_geometric_constraint_rank
+from .geometric_rank import edge_point_constraint_counts, generic_joint_constraint_rank
 from .helper import action_spec_from_action, find_dof
 from .polygon_knowledge import PolygonKnowledge
 
@@ -107,7 +107,7 @@ class SymbolicKnowledge:
     corner_angle_known: list[bool]
     dihedral_domains: list[frozenset[float]]
     reflexivity_domains: list[frozenset[bool]]
-    direct_point_observed: list[bool]
+    direct_point_count: list[int]
     direct_line_observed: list[bool]
     adjacent_nonparallel: list[bool]
     derivations: list[str] = field(default_factory=list)
@@ -155,12 +155,9 @@ def symbolic_from_polygon_knowledge(knowledge: PolygonKnowledge) -> SymbolicKnow
     length_known = [length is not None for length in knowledge.lengths]
     corner_known = [corner is not None for corner in knowledge.corners]
     corner_angle_known = [angle is not None for angle in knowledge.corner_angles]
-    direct_point_observed = [
-        len(knowledge.internal_points_on_edge[i]) > 0
-        for i in range(n_sides)
-    ]
+    direct_point_count = list(edge_point_constraint_counts(knowledge))
     direct_line_observed = [
-        edge_vector_known[i] and direct_point_observed[i]
+        edge_vector_known[i] and direct_point_count[i] > 0
         for i in range(n_sides)
     ]
 
@@ -210,7 +207,7 @@ def symbolic_from_polygon_knowledge(knowledge: PolygonKnowledge) -> SymbolicKnow
         corner_angle_known=corner_angle_known,
         dihedral_domains=dihedral_domains,
         reflexivity_domains=reflexivity_domains,
-        direct_point_observed=direct_point_observed,
+        direct_point_count=direct_point_count,
         direct_line_observed=direct_line_observed,
         adjacent_nonparallel=adjacent_nonparallel,
     )
@@ -233,7 +230,7 @@ def propagate_symbolic(knowledge: SymbolicKnowledge) -> bool:
         n_sides = knowledge.n_sides
 
         for edge_idx in range(n_sides):
-            if (knowledge.direct_point_observed[edge_idx]
+            if (knowledge.direct_point_count[edge_idx] > 0
                     and knowledge.edge_vector_known[edge_idx]
                     and not knowledge.direct_line_observed[edge_idx]):
                 knowledge.direct_line_observed[edge_idx] = True
@@ -379,15 +376,16 @@ def symbolic_dof(knowledge: SymbolicKnowledge) -> int:
     """Return the deterministic generic-rank score for a symbolic state."""
 
     n_sides = knowledge.n_sides
-    edge_anchor = int(any(knowledge.edge_vector_known))
-    vertex_anchor = int(any(knowledge.corner_known))
-    rank = generic_geometric_constraint_rank(
+    rank = generic_joint_constraint_rank(
         n_sides,
+        knowledge.corner_known,
+        knowledge.edge_vector_known,
         knowledge.length_known,
         knowledge.corner_angle_known,
+        knowledge.direct_point_count,
     )
     num_dihedrals = sum(len(domain) == 1 for domain in knowledge.dihedral_domains)
-    return 3 * n_sides - edge_anchor - 2 * vertex_anchor - rank - num_dihedrals
+    return 3 * n_sides - rank - num_dihedrals
 
 
 @dataclass(frozen=True)
@@ -643,7 +641,7 @@ def apply_symbolic_effect(state: SymbolicKnowledge,
     for edge_idx in effect.edge_vectors_known:
         result.edge_vector_known[edge_idx] = True
     for edge_idx in effect.direct_points_observed:
-        result.direct_point_observed[edge_idx] = True
+        result.direct_point_count[edge_idx] = max(result.direct_point_count[edge_idx], 1)
     for edge_idx, dihedral in effect.dihedral_assignments:
         result.dihedral_domains[edge_idx] = frozenset((dihedral,))
     for corner_idx, reflexivity in effect.reflexivity_assignments:
@@ -766,20 +764,20 @@ def generate_symbolic_candidates(state: SymbolicKnowledge,
                 ))
             previous_edge = (edge_idx - 1) % n_sides
             next_edge = (edge_idx + 1) % n_sides
-            if not state.direct_point_observed[next_edge]:
+            if state.direct_point_count[next_edge] == 0:
                 requests.append(SymbolicActionRequest(
                     ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CCK,
                     edge_idx,
                     label="seek direct point on next edge",
                 ))
-            if not state.direct_point_observed[previous_edge]:
+            if state.direct_point_count[previous_edge] == 0:
                 requests.append(SymbolicActionRequest(
                     ActionType.SLIDE_OVER_SURFACE_PARALLEL_TO_EDGE_CK,
                     edge_idx,
                     label="seek direct point on previous edge",
                 ))
 
-        if state.direct_point_observed[edge_idx] and not state.edge_vector_known[edge_idx]:
+        if state.direct_point_count[edge_idx] > 0 and not state.edge_vector_known[edge_idx]:
             if state.dihedral_is_known(edge_idx):
                 dihedral = next(iter(state.dihedral_domains[edge_idx]))
                 action_type = (
