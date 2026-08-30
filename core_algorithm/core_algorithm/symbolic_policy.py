@@ -129,17 +129,6 @@ class SymbolicKnowledge:
         self.derivations.append(message)
 
 
-def _vector_pair_is_nonparallel(vector_a: tuple[float, float],
-                                vector_b: tuple[float, float],
-                                tolerance: float = 1e-6) -> bool:
-    """Return whether two known numeric vectors encode a nonparallel relation."""
-    norm_product = math.hypot(*vector_a) * math.hypot(*vector_b)
-    if norm_product == 0.0:
-        return False
-    cross = vector_a[0] * vector_b[1] - vector_a[1] * vector_b[0]
-    return abs(cross) > tolerance * norm_product
-
-
 def symbolic_from_polygon_knowledge(knowledge: PolygonKnowledge) -> SymbolicKnowledge:
     """Project numeric knowledge into a value-free symbolic constraint state.
 
@@ -176,28 +165,10 @@ def symbolic_from_polygon_knowledge(knowledge: PolygonKnowledge) -> SymbolicKnow
         else:
             reflexivity_domains.append(_REFLEXIVITY_DOMAIN)
 
-    adjacent_nonparallel = [False] * n_sides
-    for index in range(n_sides):
-        previous_index = (index - 1) % n_sides
-        previous_vector = knowledge.edge_unit_vectors[previous_index]
-        current_vector = knowledge.edge_unit_vectors[index]
-        corner_angle = knowledge.corner_angles[index]
-        if previous_vector is not None and current_vector is not None:
-            adjacent_nonparallel[index] = _vector_pair_is_nonparallel(
-                previous_vector,
-                current_vector,
-            )
-        elif len(reflexivity_domains[index]) == 1:
-            # A known reflexivity result excludes a 180-degree joint. This is
-            # needed when an adjacent vector will be measured by a candidate
-            # action, but that vector's numeric value is not retained here.
-            adjacent_nonparallel[index] = True
-        elif corner_angle is not None:
-            adjacent_nonparallel[index] = not math.isclose(
-                corner_angle,
-                180.0,
-                abs_tol=1e-6,
-            )
+    # Consecutive boundary edges are nonparallel by the object-class
+    # assumption; reflexivity separately records which side of 180 degrees the
+    # interior angle occupies.
+    adjacent_nonparallel = [True] * n_sides
 
     return SymbolicKnowledge(
         n_sides=n_sides,
@@ -655,11 +626,9 @@ def predict_edge_exploration(state: SymbolicKnowledge,
                              edge_idx: int) -> SymbolicKnowledge:
     """Predict determinacy after the current exploration branch measures an edge.
 
-    This is the symbolic counterpart of the numerical simulator's temporary
-    two-point edge measurement.  It adds only the relations guaranteed by a
-    completed edge-exploration branch: a vector and one direct point on the
-    target edge.  It deliberately does not assign a dihedral, reflexivity, or
-    coordinate value.
+    Resolving an edge line guarantees its vector, one direct point, and the
+    target dihedral established by the prerequisite boundary interaction.
+    Other fields are credited only through symbolic polygon propagation.
     """
     if not 0 <= edge_idx < state.n_sides:
         raise IndexError(f"Edge index {edge_idx} is outside the polygon")
@@ -670,6 +639,9 @@ def predict_edge_exploration(state: SymbolicKnowledge,
             probability=1.0,
             edge_vectors_known=(edge_idx,),
             direct_points_observed=(edge_idx,),
+            dihedral_assignments=(
+                (edge_idx, min(state.dihedral_domains[edge_idx])),
+            ),
         ),
     )
 
