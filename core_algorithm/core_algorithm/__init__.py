@@ -26,7 +26,9 @@ from .data_structures import (
     ACTION_TO_SPEC
 )
 from .geometric_rank import (
+    RankCertificate,
     edge_point_constraint_counts,
+    exact_generic_joint_constraint_rank,
     geometric_constraint_rank,
     geometric_joint_constraint_rank,
     generic_geometric_constraint_rank,
@@ -58,7 +60,9 @@ __all__ = [
     "find_dof",
     "compute_residual_score_old",
     "geometric_attribute_score",
+    "RankCertificate",
     "edge_point_constraint_counts",
+    "exact_generic_joint_constraint_rank",
     "geometric_constraint_rank",
     "geometric_joint_constraint_rank",
     "generic_geometric_constraint_rank",

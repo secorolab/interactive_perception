@@ -1,136 +1,365 @@
-"""Deterministic generic rank of resolved planar-polygon constraints."""
+"""Exact generic rank of resolved planar-polygon constraints."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
+import sympy as sp
+from sympy.polys.matrices import DomainMatrix
 
 
-DEFAULT_RANK_TOLERANCE = 1e-9
-_DEGENERACY_TOLERANCE = 1e-10
-_GENERIC_SEEDS = (1729, 3253, 6421, 9013, 12011)
+@dataclass(frozen=True)
+class RankCertificate:
+    rank: int
+    lower_bound: int
+    upper_bound: int
+    proven: bool
+    method: str
 
 
-def _generic_polygon(n_sides: int, seed: int) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    spacing = 2.0 * math.pi / n_sides
-    jitter = min(0.12, 0.18 * spacing)
-    angles = spacing * np.arange(n_sides) + rng.uniform(-jitter, jitter, n_sides)
-    radii = rng.uniform(0.78, 1.24, n_sides)
-    return np.column_stack((
-        1.13 * radii * np.cos(angles) + 0.09 * np.sin(2.0 * angles),
-        0.87 * radii * np.sin(angles) + 0.07 * np.cos(3.0 * angles),
-    ))
+def _bool_tuple(values: Sequence[bool], n_sides: int, name: str) -> tuple[bool, ...]:
+    if len(values) != n_sides:
+        raise ValueError(f"{name} must contain one entry per edge/vertex")
+    return tuple(bool(value) for value in values)
 
 
-def _validate_polygon(points: np.ndarray) -> None:
-    edges = np.roll(points, -1, axis=0) - points
-    if np.any(np.linalg.norm(edges, axis=1) <= _DEGENERACY_TOLERANCE):
-        raise ValueError("constraint rank is undefined for a zero-length edge")
+def _point_count_tuple(
+    values: Sequence[int] | None,
+    n_sides: int,
+) -> tuple[int, ...]:
+    if values is None:
+        return (0,) * n_sides
+    if len(values) != n_sides or any(
+        not isinstance(value, (int, np.integer)) or value < 0 for value in values
+    ):
+        raise ValueError("edge point counts must be nonnegative integers, one per edge")
+    return tuple(min(2, int(value)) for value in values)
 
 
-def _turn_angle(points: np.ndarray, index: int) -> float:
-    incoming = points[index] - points[index - 1]
-    outgoing = points[(index + 1) % len(points)] - points[index]
-    return math.atan2(
-        float(incoming[0] * outgoing[1] - incoming[1] * outgoing[0]),
-        float(np.dot(incoming, outgoing)),
-    )
+def _polynomial_jacobian(
+    n_sides: int,
+    corner_known: tuple[bool, ...],
+    direction_known: tuple[bool, ...],
+    length_known: tuple[bool, ...],
+    angle_known: tuple[bool, ...],
+    point_counts: tuple[int, ...],
+) -> tuple[sp.Matrix, tuple[sp.Symbol, ...]]:
+    """Build the joint Jacobian after polynomial row scaling."""
 
+    xs = sp.symbols(f"x0:{n_sides}")
+    ys = sp.symbols(f"y0:{n_sides}")
+    rows: list[list[sp.Expr]] = []
+    point_symbols: list[sp.Symbol] = []
 
-def _constraint_jacobian(
-    points: np.ndarray,
-    corner_known: Sequence[bool],
-    direction_known: Sequence[bool],
-    length_known: Sequence[bool],
-    angle_known: Sequence[bool],
-    edge_point_counts: Sequence[int],
-) -> np.ndarray:
-    """Build all active rows at one consistent generic realization."""
-
-    _validate_polygon(points)
-    n_sides = len(points)
-    rows: list[np.ndarray] = []
+    def empty_row() -> list[sp.Expr]:
+        return [sp.Integer(0)] * (2 * n_sides)
 
     for index, known in enumerate(corner_known):
         if not known:
             continue
-        row_x = np.zeros(2 * n_sides)
-        row_y = np.zeros(2 * n_sides)
-        row_x[2 * index] = 1.0
-        row_y[2 * index + 1] = 1.0
+        row_x = empty_row()
+        row_y = empty_row()
+        row_x[2 * index] = sp.Integer(1)
+        row_y[2 * index + 1] = sp.Integer(1)
         rows.extend((row_x, row_y))
 
     for index, known in enumerate(direction_known):
         if not known:
             continue
         next_index = (index + 1) % n_sides
-        edge = points[next_index] - points[index]
-        direction = edge / np.linalg.norm(edge)
-        grad_edge = np.array((direction[1], -direction[0]))
-        row = np.zeros(2 * n_sides)
-        row[2 * index:2 * index + 2] = -grad_edge
-        row[2 * next_index:2 * next_index + 2] = grad_edge
+        edge_x = xs[next_index] - xs[index]
+        edge_y = ys[next_index] - ys[index]
+        row = empty_row()
+        row[2 * index] = -edge_y
+        row[2 * index + 1] = edge_x
+        row[2 * next_index] = edge_y
+        row[2 * next_index + 1] = -edge_x
         rows.append(row)
 
     for index, known in enumerate(length_known):
         if not known:
             continue
         next_index = (index + 1) % n_sides
-        edge = points[next_index] - points[index]
-        row = np.zeros(2 * n_sides)
-        row[2 * index:2 * index + 2] = -2.0 * edge
-        row[2 * next_index:2 * next_index + 2] = 2.0 * edge
+        edge_x = xs[next_index] - xs[index]
+        edge_y = ys[next_index] - ys[index]
+        row = empty_row()
+        row[2 * index] = -2 * edge_x
+        row[2 * index + 1] = -2 * edge_y
+        row[2 * next_index] = 2 * edge_x
+        row[2 * next_index + 1] = 2 * edge_y
         rows.append(row)
 
+    # Scaling each turning-angle derivative by the nonzero squared lengths of
+    # its adjacent edges removes denominators without changing generic rank.
     for index, known in enumerate(angle_known):
         if not known:
             continue
         previous_index = (index - 1) % n_sides
         next_index = (index + 1) % n_sides
-        incoming = points[index] - points[previous_index]
-        outgoing = points[next_index] - points[index]
-        turn = _turn_angle(points, index)
-        cosine = math.cos(turn)
-        sine = math.sin(turn)
-        grad_incoming = cosine * np.array((outgoing[1], -outgoing[0])) - sine * outgoing
-        grad_outgoing = cosine * np.array((-incoming[1], incoming[0])) - sine * incoming
-        row = np.zeros(2 * n_sides)
-        row[2 * previous_index:2 * previous_index + 2] = -grad_incoming
-        row[2 * index:2 * index + 2] = grad_incoming - grad_outgoing
-        row[2 * next_index:2 * next_index + 2] = grad_outgoing
+        incoming_x = xs[index] - xs[previous_index]
+        incoming_y = ys[index] - ys[previous_index]
+        outgoing_x = xs[next_index] - xs[index]
+        outgoing_y = ys[next_index] - ys[index]
+        incoming_norm_sq = incoming_x**2 + incoming_y**2
+        outgoing_norm_sq = outgoing_x**2 + outgoing_y**2
+        row = empty_row()
+        row[2 * previous_index] = -incoming_y * outgoing_norm_sq
+        row[2 * previous_index + 1] = incoming_x * outgoing_norm_sq
+        row[2 * index] = (
+            incoming_y * outgoing_norm_sq + outgoing_y * incoming_norm_sq
+        )
+        row[2 * index + 1] = (
+            -incoming_x * outgoing_norm_sq - outgoing_x * incoming_norm_sq
+        )
+        row[2 * next_index] = -outgoing_y * incoming_norm_sq
+        row[2 * next_index + 1] = outgoing_x * incoming_norm_sq
         rows.append(row)
 
-    for index, count in enumerate(edge_point_counts):
+    # A fixed point q on edge i gives cross(v_{i+1}-v_i, q-v_i)=0. At a
+    # feasible generic realization q=v_i+t(v_{i+1}-v_i); at most two distinct
+    # point incidences on one edge are independent.
+    for index, count in enumerate(point_counts):
         next_index = (index + 1) % n_sides
-        edge = points[next_index] - points[index]
-        independent_count = min(int(count), 2)
-        for point_index in range(independent_count):
-            fraction = (point_index + 1) / (independent_count + 1)
-            offset = fraction * edge
-            grad_edge = np.array((offset[1], -offset[0]))
-            grad_offset = np.array((-edge[1], edge[0]))
-            row = np.zeros(2 * n_sides)
-            row[2 * index:2 * index + 2] = -grad_edge - grad_offset
-            row[2 * next_index:2 * next_index + 2] = grad_edge
+        edge_x = xs[next_index] - xs[index]
+        edge_y = ys[next_index] - ys[index]
+        for point_index in range(count):
+            fraction = sp.Symbol(f"t_{index}_{point_index}")
+            point_symbols.append(fraction)
+            row = empty_row()
+            row[2 * index] = (1 - fraction) * edge_y
+            row[2 * index + 1] = -(1 - fraction) * edge_x
+            row[2 * next_index] = fraction * edge_y
+            row[2 * next_index + 1] = -fraction * edge_x
             rows.append(row)
 
-    if not rows:
-        return np.empty((0, 2 * n_sides))
-    jacobian = np.vstack(rows)
-    norms = np.linalg.norm(jacobian, axis=1)
-    if np.any(norms <= _DEGENERACY_TOLERANCE):
-        raise ValueError("degenerate continuous constraint has a zero Jacobian row")
-    return jacobian / norms[:, None]
+    matrix = sp.Matrix(rows) if rows else sp.zeros(0, 2 * n_sides)
+    return matrix, tuple(xs) + tuple(ys) + tuple(point_symbols)
 
 
-def _relative_rank(jacobian: np.ndarray, relative_tolerance: float) -> int:
-    if jacobian.size == 0:
-        return 0
-    singular_values = np.linalg.svd(jacobian, compute_uv=False)
-    return int(np.count_nonzero(singular_values > relative_tolerance * singular_values[0]))
+def _remove_implied_constraints(
+    n_sides: int,
+    corner_known: tuple[bool, ...],
+    direction_known: tuple[bool, ...],
+    length_known: tuple[bool, ...],
+    angle_known: tuple[bool, ...],
+    point_counts: tuple[int, ...],
+) -> tuple[tuple[bool, ...], tuple[bool, ...], tuple[bool, ...], tuple[int, ...]]:
+    """Drop rows that are provably in the span of other active rows."""
+
+    directions: list[bool] = []
+    lengths: list[bool] = []
+    angles: list[bool] = []
+    points: list[int] = []
+    for index in range(n_sides):
+        previous_index = (index - 1) % n_sides
+        next_index = (index + 1) % n_sides
+        endpoints_fixed = corner_known[index] and corner_known[next_index]
+        one_endpoint_fixed = corner_known[index] or corner_known[next_index]
+        directions.append(
+            direction_known[index]
+            and not endpoints_fixed
+            and not (point_counts[index] >= 2 and not one_endpoint_fixed)
+        )
+        lengths.append(length_known[index] and not endpoints_fixed)
+        angles.append(
+            angle_known[index]
+            and not (
+                corner_known[previous_index]
+                and corner_known[index]
+                and corner_known[next_index]
+            )
+            and not (direction_known[previous_index] and direction_known[index])
+        )
+        points.append(
+            0
+            if endpoints_fixed or (one_endpoint_fixed and direction_known[index])
+            else min(point_counts[index], 1)
+            if one_endpoint_fixed
+            else point_counts[index]
+        )
+    return tuple(directions), tuple(lengths), tuple(angles), tuple(points)
+
+
+def _witness_substitutions(
+    symbols: Sequence[sp.Symbol],
+    n_sides: int,
+    witness_index: int,
+) -> dict[sp.Symbol, sp.Rational]:
+    substitutions: dict[sp.Symbol, sp.Rational] = {}
+    for index in range(n_sides):
+        substitutions[sp.Symbol(f"x{index}")] = sp.Integer(
+            (index + 1) * (witness_index + 2) + (index * index + 3) % 7
+        )
+        substitutions[sp.Symbol(f"y{index}")] = sp.Integer(
+            (index + 2) * (index + witness_index + 3)
+            + ((2 * index + witness_index + 1) ** 2 % 11)
+        )
+    for symbol in symbols:
+        name = str(symbol)
+        if not name.startswith("t_"):
+            continue
+        local_index = int(name.rsplit("_", 1)[1])
+        substitutions[symbol] = (
+            sp.Rational(1 + witness_index % 2, 4)
+            if local_index == 0
+            else sp.Rational(3 - witness_index % 2, 4)
+        )
+    return substitutions
+
+
+def _witness_lower_bound(
+    matrix: sp.Matrix,
+    symbols: Sequence[sp.Symbol],
+    n_sides: int,
+) -> int:
+    best = 0
+    for witness_index in range(5):
+        evaluated = matrix.subs(
+            _witness_substitutions(symbols, n_sides, witness_index)
+        )
+        best = max(best, int(evaluated.rank()))
+        if best == min(matrix.rows, matrix.cols):
+            break
+    return best
+
+
+def _structural_upper_bound(
+    n_sides: int,
+    corner_known: tuple[bool, ...],
+    direction_known: tuple[bool, ...],
+    length_known: tuple[bool, ...],
+    angle_known: tuple[bool, ...],
+    point_counts: tuple[int, ...],
+) -> int:
+    """Return a conservative upper bound from row count and gauge freedom."""
+
+    scalar_rows = (
+        2 * sum(corner_known)
+        + sum(direction_known)
+        + sum(length_known)
+        + sum(angle_known)
+        + sum(point_counts)
+    )
+    if all(angle_known):
+        scalar_rows -= 1  # differential of the total turning sum
+    upper = min(2 * n_sides, max(0, scalar_rows))
+
+    corner_count = sum(corner_known)
+    has_points = any(point_counts)
+    has_direction = any(direction_known)
+    has_length = any(length_known)
+    if not has_points:
+        if corner_count == 0:
+            upper = min(upper, 2 * n_sides - 2)  # translation gauge
+            if not has_direction:
+                upper = min(
+                    upper,
+                    2 * n_sides - 3 if has_length else 2 * n_sides - 4,
+                )
+            elif not has_length:
+                upper = min(upper, 2 * n_sides - 3)  # scale gauge
+        elif corner_count == 1:
+            if not has_direction:
+                upper = min(
+                    upper,
+                    2 * n_sides - 1 if has_length else 2 * n_sides - 2,
+                )
+            elif not has_length:
+                upper = min(upper, 2 * n_sides - 1)  # scale gauge
+    return max(0, upper)
+
+
+@lru_cache(maxsize=4096)
+def _exact_rank_cached(
+    n_sides: int,
+    corner_known: tuple[bool, ...],
+    direction_known: tuple[bool, ...],
+    length_known: tuple[bool, ...],
+    angle_known: tuple[bool, ...],
+    point_counts: tuple[int, ...],
+) -> RankCertificate:
+    reduced_directions, reduced_lengths, reduced_angles, reduced_points = (
+        _remove_implied_constraints(
+            n_sides,
+            corner_known,
+            direction_known,
+            length_known,
+            angle_known,
+            point_counts,
+        )
+    )
+    matrix, symbols = _polynomial_jacobian(
+        n_sides,
+        corner_known,
+        reduced_directions,
+        reduced_lengths,
+        reduced_angles,
+        reduced_points,
+    )
+    lower = _witness_lower_bound(matrix, symbols, n_sides)
+    upper = _structural_upper_bound(
+        n_sides,
+        corner_known,
+        reduced_directions,
+        reduced_lengths,
+        reduced_angles,
+        reduced_points,
+    )
+    if lower > upper:
+        raise RuntimeError(
+            f"internal rank-certificate error: lower bound {lower} exceeds {upper}"
+        )
+    if lower == upper:
+        return RankCertificate(
+            lower,
+            lower,
+            upper,
+            True,
+            "exact rational witness and structural upper bound",
+        )
+
+    if matrix.rows == 0:
+        symbolic_rank = 0
+    else:
+        field = sp.QQ.frac_field(*symbols)
+        symbolic_rank = int(
+            DomainMatrix.from_Matrix(matrix).convert_to(field).rank()
+        )
+    if not lower <= symbolic_rank <= upper:
+        raise RuntimeError("exact symbolic rank lies outside certified bounds")
+    return RankCertificate(
+        symbolic_rank,
+        symbolic_rank,
+        symbolic_rank,
+        True,
+        "exact rational-function rank",
+    )
+
+
+def exact_generic_joint_constraint_rank(
+    n_sides: int,
+    corner_known: Sequence[bool],
+    direction_known: Sequence[bool],
+    length_known: Sequence[bool],
+    angle_known: Sequence[bool],
+    edge_point_counts: Sequence[int] | None = None,
+) -> RankCertificate:
+    """Return a certificate for the exact generic joint rank."""
+
+    if n_sides < 3:
+        raise ValueError("a polygon requires at least three sides")
+    return _exact_rank_cached(
+        n_sides,
+        _bool_tuple(corner_known, n_sides, "corner_known"),
+        _bool_tuple(direction_known, n_sides, "direction_known"),
+        _bool_tuple(length_known, n_sides, "length_known"),
+        _bool_tuple(angle_known, n_sides, "angle_known"),
+        _point_count_tuple(edge_point_counts, n_sides),
+    )
 
 
 def generic_joint_constraint_rank(
@@ -140,42 +369,17 @@ def generic_joint_constraint_rank(
     length_known: Sequence[bool],
     angle_known: Sequence[bool],
     edge_point_counts: Sequence[int] | None = None,
-    *,
-    relative_tolerance: float = DEFAULT_RANK_TOLERANCE,
 ) -> int:
-    """Return the maximum joint rank over fixed nondegenerate polygons."""
+    """Compatibility API returning only the certified rank."""
 
-    if n_sides < 3:
-        raise ValueError("a polygon requires at least three sides")
-    if any(len(mask) != n_sides for mask in (
-        corner_known, direction_known, length_known, angle_known
-    )):
-        raise ValueError("constraint masks must contain one entry per edge/vertex")
-    if edge_point_counts is None:
-        edge_point_counts = [0] * n_sides
-    if len(edge_point_counts) != n_sides or any(
-        not isinstance(count, (int, np.integer)) or count < 0
-        for count in edge_point_counts
-    ):
-        raise ValueError("edge point counts must be nonnegative integers, one per edge")
-    if not 0.0 < relative_tolerance < 1.0:
-        raise ValueError("relative rank tolerance must lie in (0, 1)")
-
-    ranks = (
-        _relative_rank(
-            _constraint_jacobian(
-                _generic_polygon(n_sides, seed),
-                corner_known,
-                direction_known,
-                length_known,
-                angle_known,
-                edge_point_counts,
-            ),
-            relative_tolerance,
-        )
-        for seed in _GENERIC_SEEDS
-    )
-    return min(2 * n_sides, max(ranks, default=0))
+    return exact_generic_joint_constraint_rank(
+        n_sides,
+        corner_known,
+        direction_known,
+        length_known,
+        angle_known,
+        edge_point_counts,
+    ).rank
 
 
 def _validate_resolved_values(knowledge) -> None:
@@ -211,7 +415,7 @@ def _validate_resolved_values(knowledge) -> None:
             if (
                 value.shape != (2,)
                 or not np.all(np.isfinite(value))
-                or np.linalg.norm(value) <= _DEGENERACY_TOLERANCE
+                or np.linalg.norm(value) <= 1e-12
             ):
                 raise ValueError(f"edge direction {index} must be finite and nonzero")
     for index, slope in enumerate(knowledge.slopes):
@@ -241,12 +445,8 @@ def edge_point_constraint_counts(knowledge) -> tuple[int, ...]:
     return tuple(_unique_edge_point_count(points) for points in knowledge.internal_points_on_edge)
 
 
-def geometric_joint_constraint_rank(
-    knowledge,
-    *,
-    relative_tolerance: float = DEFAULT_RANK_TOLERANCE,
-) -> int:
-    """Return generic joint rank of all resolved continuous attributes."""
+def geometric_joint_constraint_rank(knowledge) -> int:
+    """Return exact generic joint rank of all resolved continuous attributes."""
 
     _validate_resolved_values(knowledge)
     n_sides = knowledge.n_sides
@@ -261,34 +461,26 @@ def geometric_joint_constraint_rank(
         [value is not None for value in knowledge.lengths],
         [value is not None for value in knowledge.corner_angles],
         edge_point_constraint_counts(knowledge),
-        relative_tolerance=relative_tolerance,
     )
 
 
-# Compatibility wrappers for callers that still request intrinsic-only rank.
 def generic_geometric_constraint_rank(
     n_sides: int,
     length_known: Sequence[bool],
     angle_known: Sequence[bool],
-    *,
-    relative_tolerance: float = DEFAULT_RANK_TOLERANCE,
 ) -> int:
+    """Compatibility wrapper for intrinsic-only constraint rank."""
+
     return generic_joint_constraint_rank(
         n_sides,
         [False] * n_sides,
         [False] * n_sides,
         length_known,
         angle_known,
-        relative_tolerance=relative_tolerance,
     )
 
 
-def geometric_constraint_rank(
-    knowledge,
-    *,
-    relative_tolerance: float = DEFAULT_RANK_TOLERANCE,
-) -> int:
-    return geometric_joint_constraint_rank(
-        knowledge,
-        relative_tolerance=relative_tolerance,
-    )
+def geometric_constraint_rank(knowledge) -> int:
+    """Compatibility wrapper for the joint rank."""
+
+    return geometric_joint_constraint_rank(knowledge)
