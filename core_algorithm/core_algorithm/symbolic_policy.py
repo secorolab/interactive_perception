@@ -622,9 +622,10 @@ def apply_symbolic_effect(state: SymbolicKnowledge,
     return result
 
 
-def predict_edge_exploration(state: SymbolicKnowledge,
-                             edge_idx: int) -> SymbolicKnowledge:
-    """Predict determinacy after the current exploration branch measures an edge.
+def predict_edge_exploration_outcomes(
+        state: SymbolicKnowledge,
+        edge_idx: int) -> tuple[SymbolicKnowledge, ...]:
+    """Predict every dihedral outcome of a completed edge-line query.
 
     Resolving an edge line guarantees its vector, one direct point, and the
     target dihedral established by the prerequisite boundary interaction.
@@ -632,17 +633,23 @@ def predict_edge_exploration(state: SymbolicKnowledge,
     """
     if not 0 <= edge_idx < state.n_sides:
         raise IndexError(f"Edge index {edge_idx} is outside the polygon")
-    return apply_symbolic_effect(
-        state,
-        SymbolicEffect(
-            description=f"completed exploration branch directly observes edge {edge_idx}",
-            probability=1.0,
-            edge_vectors_known=(edge_idx,),
-            direct_points_observed=(edge_idx,),
-            dihedral_assignments=(
-                (edge_idx, min(state.dihedral_domains[edge_idx])),
+    domain = state.dihedral_domains[edge_idx]
+    probability = 1.0 / len(domain)
+    return tuple(
+        apply_symbolic_effect(
+            state,
+            SymbolicEffect(
+                description=(
+                    f"completed exploration branch directly observes edge "
+                    f"{edge_idx} with dihedral {dihedral:g}"
+                ),
+                probability=probability,
+                edge_vectors_known=(edge_idx,),
+                direct_points_observed=(edge_idx,),
+                dihedral_assignments=((edge_idx, dihedral),),
             ),
-        ),
+        )
+        for dihedral in sorted(domain)
     )
 
 
