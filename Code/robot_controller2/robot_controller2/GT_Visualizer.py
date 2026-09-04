@@ -347,15 +347,28 @@ class GT_VisualizerNode(Node):
                 pose_in.pose.orientation.z,
                 pose_in.pose.orientation.w
             ]).as_euler('zyx', degrees=True)
+            target_quaternion_to_euler = R.from_quat([
+                pose_out.pose.orientation.x,
+                pose_out.pose.orientation.y,
+                pose_out.pose.orientation.z,
+                pose_out.pose.orientation.w
+            ]).as_euler('zyx', degrees=True)
             
             prompt = (
-                f"Add marker {marker_id} pose from camera_color_frame to ground truth? "
-                f"position=({pose_in.pose.position.x:.4f}, "
+                f"Add marker {marker_id} pose to ground truth?\n"
+                f"  {source_frame}: position=({pose_in.pose.position.x:.4f}, "
                 f"{pose_in.pose.position.y:.4f}, "
                 f"{pose_in.pose.position.z:.4f}), "
-                f"orientation=({quaternion_to_euler[0]:.1f}°, "
+                f"orientation zyx=({quaternion_to_euler[0]:.1f}°, "
                 f"{quaternion_to_euler[1]:.1f}°, "
-                f"{quaternion_to_euler[2]:.1f}°), [y/N]: "
+                f"{quaternion_to_euler[2]:.1f}°)\n"
+                f"  {pose_out.header.frame_id}: position=({pose_out.pose.position.x:.5f}, "
+                f"{pose_out.pose.position.y:.5f}, "
+                f"{pose_out.pose.position.z:.5f}), "
+                f"orientation zyx=({target_quaternion_to_euler[0]:.1f}°, "
+                f"{target_quaternion_to_euler[1]:.1f}°, "
+                f"{target_quaternion_to_euler[2]:.1f}°)\n"
+                "  Accept? [y/N]: "
             )
             try:
                 consent = input(prompt).strip().lower()
@@ -364,7 +377,8 @@ class GT_VisualizerNode(Node):
 
             if consent not in ("y", "yes"):
                 self.get_logger().info(
-                    f"Skipped marker {marker_id}; user did not approve the camera_color_frame pose."
+                    f"Discarded the current observation of marker {marker_id}; "
+                    "it may be offered again on a later detection."
                 )
                 continue
 
